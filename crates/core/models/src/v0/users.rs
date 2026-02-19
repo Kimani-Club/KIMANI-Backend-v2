@@ -115,6 +115,9 @@ auto_derived!(
         /// City
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         pub city: Option<String>,
+        /// Virtual city
+        #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+        pub virtual_city: Option<String>,
         /// Occupation
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         pub occupation: Option<String>,

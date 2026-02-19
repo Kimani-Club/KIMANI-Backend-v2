@@ -111,6 +111,7 @@ pub static DEFAULT_PERMISSION_SAVED_MESSAGES: u64 = Permission::GrantAllSafe as 
 pub static DEFAULT_PERMISSION_DIRECT_MESSAGE: Lazy<u64> = Lazy::new(|| DEFAULT_PERMISSION.add(Permission::ManageChannel + Permission::React));
 pub static DEFAULT_PERMISSION_SERVER: Lazy<u64> = Lazy::new(|| DEFAULT_PERMISSION.add(Permission::React + Permission::ChangeNickname + Permission::ChangeAvatar));
 pub static DEFAULT_WEBHOOK_PERMISSIONS: Lazy<u64> = Lazy::new(|| Permission::SendMessage + Permission::SendEmbeds + Permission::Masquerade + Permission::React);
+/// Permissions for marketplace direct messages
 pub static DEFAULT_PERMISSION_MARKETPLACE_DM: Lazy<u64> = Lazy::new(|| {
     Permission::ViewChannel
         + Permission::ReadMessageHistory

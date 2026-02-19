@@ -27,6 +27,9 @@ pub struct DataUserProfile {
     /// City
     #[validate(length(min = 1, max = 2000))]
     city: String,
+    /// Virtual city
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub virtual_city: Option<String>,
     /// Occupation
     #[validate(length(min = 1, max = 2000))]
     occupation: String,
@@ -104,6 +107,9 @@ pub async fn req(
     new_profile.country = Some(country);
     let city = profile.city;
     new_profile.city = Some(city);
+    if let Some(virtual_city) = profile.virtual_city {
+        new_profile.virtual_city = Some(virtual_city);
+    }
     let occupation = profile.occupation;
     if let Some(x_account) = profile.x_account {
         new_profile.x_account = Some(x_account);
