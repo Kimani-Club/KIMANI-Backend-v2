@@ -20,6 +20,8 @@ pub struct DataApplication {
     pub phone_number: String,
     pub country: String,
     pub city: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub virtual_city: Option<String>,
     pub occupation: String,
     pub avatar: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -109,6 +111,9 @@ pub async fn webhook_receive_application(
     new_profile.country = Some(country);
     let city = profile.city;
     new_profile.city = Some(city);
+    if let Some(virtual_city) = profile.virtual_city {
+        new_profile.virtual_city = Some(virtual_city);
+    }
     let occupation = profile.occupation;
     new_profile.occupation = Some(occupation);
     if let Some(x_account) = profile.x_account {

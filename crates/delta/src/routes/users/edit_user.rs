@@ -40,6 +40,10 @@ pub struct UserProfileData {
     #[validate(length(min = 0, max = 2000))]
     #[serde(skip_serializing_if = "Option::is_none")]
     city: Option<String>,
+    /// Virtual city
+    #[validate(length(min = 0, max = 2000))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    virtual_city: Option<String>,
     /// Occupation
     #[validate(length(min = 0, max = 2000))]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -220,6 +224,9 @@ pub async fn req(
 
         if let Some(city) = profile.city {
             new_profile.city = Some(city);
+        }
+        if let Some(virtual_city) = profile.virtual_city {
+            new_profile.virtual_city = Some(virtual_city);
         }
 
         if let Some(occupation) = profile.occupation {
