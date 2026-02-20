@@ -80,6 +80,9 @@ pub struct UserProfile {
     /// City
     #[serde(skip_serializing_if = "Option::is_none")]
     pub city: Option<String>,
+    /// Virtual city
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub virtual_city: Option<String>,
     /// Occupation
     #[serde(skip_serializing_if = "Option::is_none")]
     pub occupation: Option<String>,

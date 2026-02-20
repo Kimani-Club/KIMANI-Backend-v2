@@ -391,6 +391,7 @@ impl From<crate::UserProfile> for UserProfile {
             phone_number: value.phone_number,
             country: value.country,
             city: value.city,
+            virtual_city: value.virtual_city,
             occupation: value.occupation,
             x_account: value.x_account,
             facebook: value.facebook,
