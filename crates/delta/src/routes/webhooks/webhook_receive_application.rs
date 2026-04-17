@@ -1,6 +1,6 @@
 use rand::{thread_rng, Rng};
 use revolt_quark::authifier::config::{EmailVerificationConfig, Template};
-use revolt_quark::authifier::{models::Account, Authifier};
+use revolt_quark::authifier::{models::Account, util::normalise_email, Authifier};
 use revolt_quark::models::File;
 use revolt_quark::{
     models::User,
@@ -81,10 +81,16 @@ pub async fn webhook_receive_application(
         })
         .collect();
     let password_cloned = password.clone();
-    let _account = match Account::new(authifier, email, password, false).await {
+    // Get-or-create: if the email already has an Authifier account (idempotent re-runs),
+    // reuse the existing account instead of failing.
+    let _account = match Account::new(authifier, email.clone(), password, false).await {
         Ok(account) => account,
-        Err(err) => {
-            return Err(Error::InvalidOperation); // Return HTTP 500 Internal Server Error
+        Err(_) => {
+            let normalised = normalise_email(email.clone());
+            match authifier.database.find_account_by_normalised_email(&normalised).await {
+                Ok(existing) => existing,
+                Err(_) => return Err(Error::InvalidOperation),
+            }
         }
     };
     let session_name = data.email.clone() + "_webhook";
@@ -194,7 +200,8 @@ pub async fn webhook_receive_application(
             }),
         );
     }
-    db.insert_user(&user).await?;
+    // Best-effort insert: ignore duplicate-key errors (idempotent re-runs).
+    let _ = db.insert_user(&user).await;
     // Best-effort: join the default community server if it exists.
     // Non-fatal so the endpoint works in environments without a DEFAULT_SERVER
     // (e.g. local dev) and the caller still receives the session token.
