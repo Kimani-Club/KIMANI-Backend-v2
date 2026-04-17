@@ -81,17 +81,23 @@ pub async fn webhook_receive_application(
         })
         .collect();
     let password_cloned = password.clone();
-    // Get-or-create: if the email already has an Authifier account (idempotent re-runs),
-    // reuse the existing account instead of failing.
-    let _account = match Account::new(authifier, email.clone(), password, false).await {
-        Ok(account) => account,
-        Err(_) => {
-            let normalised = normalise_email(email.clone());
-            match authifier.database.find_account_by_normalised_email(&normalised).await {
-                Ok(Some(existing)) => existing,
-                Ok(None) | Err(_) => return Err(Error::InvalidOperation),
-            }
+    // Get-or-create: look up existing account first to avoid triggering
+    // password-reset emails (which fail when email is disabled). Only call
+    // Account::new() for brand-new accounts.
+    let normalised = normalise_email(email.clone());
+    let _account = match authifier
+        .database
+        .find_account_by_normalised_email(&normalised)
+        .await
+    {
+        Ok(Some(existing)) => existing,
+        Ok(None) => {
+            // No existing account — create a new one.
+            Account::new(authifier, email.clone(), password, false)
+                .await
+                .map_err(|_| Error::InvalidOperation)?
         }
+        Err(_) => return Err(Error::InvalidOperation),
     };
     let session_name = data.email.clone() + "_webhook";
     let session = match Account::create_session(&_account, authifier, session_name).await {
