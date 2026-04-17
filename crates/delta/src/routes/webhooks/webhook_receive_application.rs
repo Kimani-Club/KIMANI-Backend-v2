@@ -5,11 +5,17 @@ use revolt_quark::models::File;
 use revolt_quark::{
     models::User,
     variables::delta::{APP_URL, DEFAULT_SERVER},
-    Database, EmptyResponse, Error, Result,
+    Database, Error, Result,
 };
 use rocket::{serde::json::Json, State};
 use serde::{Deserialize, Serialize};
 use validator::Validate;
+
+#[derive(Serialize, JsonSchema)]
+pub struct ApplicationResponse {
+    pub token: String,
+    pub user_id: String,
+}
 
 #[derive(Validate, Serialize, Deserialize, JsonSchema)]
 pub struct DataApplication {
@@ -23,7 +29,8 @@ pub struct DataApplication {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub virtual_city: Option<String>,
     pub occupation: String,
-    pub avatar: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub x_account: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -55,7 +62,7 @@ pub async fn webhook_receive_application(
     authifier: &State<Authifier>,
     db: &State<Database>,
     data: Json<DataApplication>,
-) -> Result<EmptyResponse> {
+) -> Result<Json<ApplicationResponse>> {
     let data = data.into_inner();
     data.validate()
         .map_err(|error| Error::FailedValidation { error })?;
@@ -90,13 +97,17 @@ pub async fn webhook_receive_application(
     let full_name = format!("{} {}", &data.first_name, &data.last_name);
     let username = User::validate_username(full_name)?;
     let mut user = User {
-        id: session.user_id,
+        id: session.user_id.clone(),
         discriminator: User::find_discriminator(db, &username, None).await?,
         username,
         ..Default::default()
     };
 
-    user.avatar = Some(File::use_avatar(db, &data.avatar, &user.id).await?);
+    if let Some(ref avatar_data) = data.avatar {
+        if !avatar_data.is_empty() {
+            user.avatar = Some(File::use_avatar(db, avatar_data, &user.id).await?);
+        }
+    }
     let profile = data;
     let mut new_profile = user.profile.take().unwrap_or_default();
     let content = profile.content;
@@ -184,7 +195,14 @@ pub async fn webhook_receive_application(
         );
     }
     db.insert_user(&user).await?;
-    let server = db.fetch_server(&DEFAULT_SERVER).await?;
-    server.create_member(db, user, None).await?;
-    Ok(EmptyResponse)
+    // Best-effort: join the default community server if it exists.
+    // Non-fatal so the endpoint works in environments without a DEFAULT_SERVER
+    // (e.g. local dev) and the caller still receives the session token.
+    if let Ok(server) = db.fetch_server(&DEFAULT_SERVER).await {
+        let _ = server.create_member(db, user, None).await;
+    }
+    Ok(Json(ApplicationResponse {
+        token: session.token.clone(),
+        user_id: session.user_id.clone(),
+    }))
 }
