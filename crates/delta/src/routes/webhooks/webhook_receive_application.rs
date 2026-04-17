@@ -88,8 +88,8 @@ pub async fn webhook_receive_application(
         Err(_) => {
             let normalised = normalise_email(email.clone());
             match authifier.database.find_account_by_normalised_email(&normalised).await {
-                Ok(existing) => existing,
-                Err(_) => return Err(Error::InvalidOperation),
+                Ok(Some(existing)) => existing,
+                Ok(None) | Err(_) => return Err(Error::InvalidOperation),
             }
         }
     };
