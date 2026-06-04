@@ -3,7 +3,7 @@ name: Docker Test & Publish
 on:
   push:
     branches:
-      - "master"
+      - "main"
       - "develop"
     tags:
       - "*"
