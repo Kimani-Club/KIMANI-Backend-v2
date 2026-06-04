@@ -25,7 +25,7 @@ jobs:
     name: Build base image
     runs-on: ubuntu-latest
 
-    if: startsWith(github.event.head_commit.message, 'Merge')
+    if: startsWith(github.event.head_commit.message, 'Merge') || github.event_name == 'workflow_dispatch'
 
     permissions:
       contents: read
@@ -51,7 +51,7 @@ jobs:
           context: .
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: ghcr.io/kimanilife/base:latest
+          tags: ghcr.io/kimani-club/base:latest
           cache-from: type=gha,scope=buildx-base-multi-arch
           cache-to: type=gha,scope=buildx-base-multi-arch,mode=max
 
@@ -60,7 +60,7 @@ jobs:
     name: Build ${{ matrix.project }} image
     runs-on: ubuntu-latest
 
-    if: startsWith(github.event.head_commit.message, 'Merge')
+    if: startsWith(github.event.head_commit.message, 'Merge') || github.event_name == 'workflow_dispatch'
 
     permissions:
       contents: read
@@ -90,11 +90,11 @@ jobs:
             {
               "delta": {
                 "path": "crates/delta",
-                "tag": "kimanilife/server"
+                "tag": "kimani-club/server"
               },
               "bonfire": {
                 "path": "crates/bonfire",
-                "tag": "kimanilife/bonfire"
+                "tag": "kimani-club/bonfire"
               }
             }
           export_to: output
@@ -124,6 +124,6 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            BASE_IMAGE=ghcr.io/kimanilife/base:latest
+            BASE_IMAGE=ghcr.io/kimani-club/base:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
