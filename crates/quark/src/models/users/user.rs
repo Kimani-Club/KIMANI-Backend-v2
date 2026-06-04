@@ -170,6 +170,11 @@ pub struct User {
     /// Username
     pub username: String,
     /// Discriminator
+    ///
+    /// Documents created before this field existed don't have it; default to
+    /// an empty string so they still deserialise instead of being dropped
+    /// from `fetch_users` results.
+    #[serde(default)]
     pub discriminator: String,
     /// Display name
     #[serde(skip_serializing_if = "Option::is_none")]

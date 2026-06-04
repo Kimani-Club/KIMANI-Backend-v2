@@ -1,5 +1,6 @@
 # Build Stage
-FROM ghcr.io/kimanilife/base:latest AS builder
+ARG BASE_IMAGE=ghcr.io/kimani-club/base:latest
+FROM ${BASE_IMAGE} AS builder
 
 # Bundle Stage
 FROM debian:bullseye-slim

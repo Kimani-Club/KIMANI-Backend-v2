@@ -144,6 +144,12 @@ pub fn spawn_client(db: &'static Database, stream: TcpStream, addr: SocketAddr) 
                                             }) {
                                                 Some((channel, item)) => {
                                                     if let Ok(mut event) = item {
+                                                        // Force-close this WebSocket — user's sessions
+                                                        // have been revoked externally (e.g. soft delete).
+                                                        if matches!(event, EventV1::SessionRevoke) {
+                                                            break;
+                                                        }
+
                                                         if state
                                                             .handle_incoming_event_v1(
                                                                 db, &mut event,

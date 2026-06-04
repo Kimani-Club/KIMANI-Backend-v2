@@ -233,4 +233,9 @@ pub enum EventV1 {
 
     /// Auth events
     Auth(AuthifierEvent),
+
+    /// Signals Bonfire to immediately close this user's WebSocket connection.
+    /// Published by external services (e.g. NestJS) to the {user_id}! private channel
+    /// after revoking all sessions for a soft-deleted member.
+    SessionRevoke,
 }
