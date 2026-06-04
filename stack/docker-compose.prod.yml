@@ -1,7 +1,7 @@
 services:
   # REST API
   delta:
-    image: ghcr.io/kimanilife/server:master
+    image: ghcr.io/kimani-club/server:main
     networks:
       - backend
       - apps
@@ -31,7 +31,7 @@ services:
 
   # Websockets Events
   bonfire:
-    image: ghcr.io/kimanilife/bonfire:master
+    image: ghcr.io/kimani-club/bonfire:main
     networks:
       - backend
       - apps
