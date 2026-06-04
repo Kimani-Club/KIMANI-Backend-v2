@@ -113,8 +113,27 @@ impl AbstractUser for MongoDb {
             })?;
 
         let mut users = vec![];
-        while let Some(Ok(user)) = cursor.next().await {
-            users.push(user);
+        let mut skipped: u32 = 0;
+        while let Some(result) = cursor.next().await {
+            match result {
+                Ok(user) => users.push(user),
+                // A document that fails to deserialise (schema drift) or a
+                // transient cursor error must not silently truncate the
+                // result — joins like /servers/{id}/members assume every
+                // readable user comes back. Skip it, keep the rest.
+                Err(err) => {
+                    error!("fetch_users: skipping unreadable user document: {err}");
+                    skipped += 1;
+                    // Defensive cap: a *persistent* cursor error (e.g. a
+                    // failing getMore that doesn't invalidate the cursor)
+                    // must not spin this loop forever. Return what we have —
+                    // best-effort, bounded, and logged.
+                    if skipped >= 100 {
+                        error!("fetch_users: too many cursor errors, returning partial result");
+                        break;
+                    }
+                }
+            }
         }
 
         Ok(users)
