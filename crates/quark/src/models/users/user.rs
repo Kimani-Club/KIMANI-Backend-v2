@@ -218,6 +218,50 @@ pub struct User {
     pub temporary_password: Option<bool>,
 }
 
+impl User {
+    /// Bit 0 of `flags` — set by Kimani's Node backend when an admin
+    /// removes a member (see AccountsService.disableAccount). Suspended
+    /// users must never appear to other users: single profile lookup,
+    /// member lists, and the WS Ready payload all check this.
+    pub fn is_suspended(&self) -> bool {
+        self.flags.unwrap_or(0) & (Flags::Suspended as i32) != 0
+    }
+}
+
+#[cfg(test)]
+mod suspended_tests {
+    use super::*;
+
+    fn user_with_flags(flags: Option<i32>) -> User {
+        User {
+            flags,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn no_flags_is_not_suspended() {
+        assert!(!user_with_flags(None).is_suspended());
+    }
+
+    #[test]
+    fn suspended_bit_set_is_suspended() {
+        assert!(user_with_flags(Some(Flags::Suspended as i32)).is_suspended());
+    }
+
+    #[test]
+    fn other_bits_without_suspended_is_not_suspended() {
+        let other_bits = Flags::Deleted as i32 | Flags::Banned as i32 | Flags::Spam as i32;
+        assert!(!user_with_flags(Some(other_bits)).is_suspended());
+    }
+
+    #[test]
+    fn suspended_bit_combined_with_other_bits_is_suspended() {
+        let combined = Flags::Suspended as i32 | Flags::Banned as i32;
+        assert!(user_with_flags(Some(combined)).is_suspended());
+    }
+}
+
 /// Optional fields on user object
 #[derive(Serialize, Deserialize, JsonSchema, Debug, PartialEq, Eq, Clone)]
 pub enum FieldsUser {
