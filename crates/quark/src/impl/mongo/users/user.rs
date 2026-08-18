@@ -136,6 +136,12 @@ impl AbstractUser for MongoDb {
             }
         }
 
+        // Shared by both the server member list (member_fetch_all.rs) and the
+        // WS Ready payload (events/impl.rs) — excluding suspended users here
+        // hides them from both at once. Callers already tolerate a member
+        // with no matching user (see member_fetch_all.rs's retain_online).
+        users.retain(|u| !u.is_suspended());
+
         Ok(users)
     }
 
