@@ -71,8 +71,12 @@ impl AbstractUser for DummyDb {
         user_id: &str,
         target_id: &str,
         relationship: &RelationshipStatus,
+        note: Option<&str>,
     ) -> Result<()> {
-        info!("Set relationship from {user_id} to {target_id} as {relationship:?}");
+        info!(
+            "Set relationship from {user_id} to {target_id} as {relationship:?} (has_note: {})",
+            note.is_some()
+        );
         Ok(())
     }
 

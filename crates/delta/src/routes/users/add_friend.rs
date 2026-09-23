@@ -16,6 +16,6 @@ pub async fn req(db: &State<Database>, user: User, target: Ref) -> Result<Json<U
         return Err(Error::IsBot);
     }
 
-    user.add_friend(db, &mut target).await?;
+    user.add_friend(db, &mut target, None).await?;
     Ok(Json(target.with_auto_perspective(db, &user).await))
 }
