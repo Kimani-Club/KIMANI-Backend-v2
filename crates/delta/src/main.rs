@@ -86,6 +86,7 @@ async fn rocket() -> _ {
         .manage(cors.clone())
         .attach(revolt_quark::web::ratelimiter::RatelimitFairing)
         .attach(cors)
+        .attach(util::gzip::GzipFairing)
         .configure(rocket::Config {
             limits: rocket::data::Limits::default().limit("string", 5.megabytes()),
             address: Ipv4Addr::new(0, 0, 0, 0).into(),
