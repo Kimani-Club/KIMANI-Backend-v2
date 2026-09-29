@@ -291,10 +291,26 @@ impl AbstractUser for MongoDb {
         user_id: &str,
         target_id: &str,
         relationship: &RelationshipStatus,
+        note: Option<&str>,
     ) -> Result<()> {
         if let RelationshipStatus::None = relationship {
             return self.pull_relationship(user_id, target_id).await;
         }
+
+        // Every transition rewrites this entry from scratch (filter out the
+        // old one, push a fresh one), so a note is only ever carried over
+        // when the caller explicitly passes it back in — accept/reject/
+        // cancel/block all call this with `note: None` and so drop it.
+        let mut new_entry = doc! {
+            "_id": target_id,
+            "status": format!("{relationship:?}")
+        };
+        if *relationship == RelationshipStatus::Incoming {
+            if let Some(note) = note {
+                new_entry.insert("note", note);
+            }
+        }
+        let new_entries = vec![new_entry];
 
         self.col::<Document>(COL)
             .update_one(
@@ -321,12 +337,7 @@ impl AbstractUser for MongoDb {
                                         []
                                     ]
                                 },
-                                [
-                                    {
-                                        "_id": target_id,
-                                        "status": format!("{relationship:?}")
-                                    }
-                                ]
+                                { "$literal": new_entries }
                             ]
                         }
                     }

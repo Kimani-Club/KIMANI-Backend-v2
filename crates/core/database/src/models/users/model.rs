@@ -68,6 +68,8 @@ auto_derived!(
         #[serde(rename = "_id")]
         pub id: String,
         pub status: RelationshipStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub note: Option<String>,
     }
 
     /// Presence status

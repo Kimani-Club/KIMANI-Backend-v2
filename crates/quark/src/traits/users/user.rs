@@ -46,11 +46,16 @@ pub trait AbstractUser: Sync + Send {
     /// Set relationship with another user
     ///
     /// This should use pull_relationship if relationship is None.
+    /// `note` replaces any note already stored on this entry — pass `None`
+    /// to leave the entry without one (every status transition rewrites the
+    /// entry from scratch, so omitting `note` here is what makes accepting,
+    /// rejecting, cancelling or blocking drop a previously stored note).
     async fn set_relationship(
         &self,
         user_id: &str,
         target_id: &str,
         relationship: &RelationshipStatus,
+        note: Option<&str>,
     ) -> Result<()>;
 
     /// Remove relationship with another user

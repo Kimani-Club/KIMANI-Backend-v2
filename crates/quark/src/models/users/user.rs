@@ -27,6 +27,13 @@ pub struct Relationship {
     #[serde(rename = "_id")]
     pub id: String,
     pub status: RelationshipStatus,
+    /// Optional note attached by the sender when this entry was created as
+    /// an incoming friend request. Only ever populated on the recipient's
+    /// own `relations` entry, never on the sender's `Outgoing` entry, and
+    /// dropped whenever the entry's status changes (accept/reject/cancel/
+    /// block all rewrite or remove the entry — see `set_relationship`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// Presence status
@@ -210,6 +217,12 @@ pub struct User {
     /// Current session user's relationship with this user
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relationship: Option<RelationshipStatus>,
+    /// Note attached to the current session user's incoming friend request
+    /// from this user, if any. Derived from the viewer's own `relations`
+    /// entry (see `get_relationship_note`), so it is only ever populated
+    /// for the recipient of an Incoming request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relationship_note: Option<String>,
     /// Whether this user is currently online
     #[serde(skip_serializing_if = "Option::is_none")]
     pub online: Option<bool>,
