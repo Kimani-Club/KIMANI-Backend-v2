@@ -3,7 +3,7 @@ ARG BASE_IMAGE=ghcr.io/kimani-club/base:latest
 FROM ${BASE_IMAGE} AS builder
 
 # Bundle Stage
-FROM debian:bullseye-slim
+FROM debian:bookworm-slim
 RUN apt-get update && \
     apt-get install -y ca-certificates && \
     apt-get clean
