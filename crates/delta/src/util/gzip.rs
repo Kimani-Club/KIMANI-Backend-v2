@@ -71,7 +71,9 @@ impl Fairing for GzipFairing {
 
         response.set_header(Header::new("Content-Encoding", "gzip"));
         // Caches must not hand a gzipped body to a client that can't decode it.
-        response.set_header(Header::new("Vary", "Accept-Encoding"));
+        // Adjoin, don't set: CORS already sends `Vary: Origin`, and replacing
+        // it would let a cache serve one origin's CORS headers to another.
+        response.adjoin_header(Header::new("Vary", "Accept-Encoding"));
         response.set_sized_body(compressed.len(), Cursor::new(compressed));
     }
 }
@@ -87,7 +89,7 @@ mod tests {
         use flate2::read::GzDecoder;
         use std::io::Read;
 
-        let original = "{\"members\":[\"".to_string() + &"a".repeat(5000) + "\"]}";
+        let original = format!("{{\"members\":[\"{}\"]}}", "a".repeat(5000));
         let input = original.as_bytes();
         assert!(input.len() >= MIN_GZIP_BYTES);
 
@@ -100,5 +102,76 @@ mod tests {
         let mut decoded = Vec::new();
         decoder.read_to_end(&mut decoded).unwrap();
         assert_eq!(decoded, input, "gzip must be lossless");
+    }
+
+    // The fairing end to end: big bodies come back gzipped and decode to the
+    // original, an existing `Vary` survives, and small or non-gzip requests
+    // get their body back untouched.
+    #[rocket::async_test]
+    async fn fairing_compresses_and_restores_bodies() {
+        use flate2::read::GzDecoder;
+        use rocket::http::{Header, Status};
+        use rocket::local::asynchronous::Client;
+        use std::io::Read;
+
+        #[rocket::get("/big")]
+        fn big() -> (Status, (rocket::http::ContentType, String)) {
+            (
+                Status::Ok,
+                (rocket::http::ContentType::JSON, "x".repeat(5000)),
+            )
+        }
+        #[rocket::get("/small")]
+        fn small() -> &'static str {
+            "tiny"
+        }
+
+        struct VaryOrigin;
+        #[rocket::async_trait]
+        impl Fairing for VaryOrigin {
+            fn info(&self) -> Info {
+                Info {
+                    name: "Vary Origin",
+                    kind: Kind::Response,
+                }
+            }
+            async fn on_response<'r>(&self, _: &'r Request<'_>, res: &mut Response<'r>) {
+                res.set_header(Header::new("Vary", "Origin"));
+            }
+        }
+
+        let rocket = rocket::build()
+            .mount("/", rocket::routes![big, small])
+            .attach(VaryOrigin)
+            .attach(GzipFairing);
+        let client = Client::tracked(rocket).await.unwrap();
+
+        let res = client
+            .get("/big")
+            .header(Header::new("Accept-Encoding", "gzip, deflate, br"))
+            .dispatch()
+            .await;
+        assert_eq!(res.headers().get_one("Content-Encoding"), Some("gzip"));
+        let vary: Vec<_> = res.headers().get("Vary").collect();
+        assert!(vary.contains(&"Origin"), "CORS Vary must survive: {vary:?}");
+        assert!(vary.contains(&"Accept-Encoding"));
+        let bytes = res.into_bytes().await.unwrap();
+        let mut decoded = String::new();
+        GzDecoder::new(Cursor::new(bytes))
+            .read_to_string(&mut decoded)
+            .unwrap();
+        assert_eq!(decoded, "x".repeat(5000));
+
+        let res = client.get("/big").dispatch().await;
+        assert!(res.headers().get_one("Content-Encoding").is_none());
+        assert_eq!(res.into_string().await.unwrap(), "x".repeat(5000));
+
+        let res = client
+            .get("/small")
+            .header(Header::new("Accept-Encoding", "gzip"))
+            .dispatch()
+            .await;
+        assert!(res.headers().get_one("Content-Encoding").is_none());
+        assert_eq!(res.into_string().await.unwrap(), "tiny");
     }
 }
