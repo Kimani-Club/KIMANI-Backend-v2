@@ -169,8 +169,8 @@ impl From<crate::Channel> for Channel {
                 seller,
                 listing_id,
                 last_message_id,
-                active ,
-                recipients, 
+                active,
+                recipients,
             } => Channel::MarketplaceDM {
                 id,
                 buyer,
@@ -356,6 +356,7 @@ impl From<crate::Relationship> for Relationship {
         Self {
             user_id: value.id,
             status: value.status.into(),
+            note: value.note,
         }
     }
 }

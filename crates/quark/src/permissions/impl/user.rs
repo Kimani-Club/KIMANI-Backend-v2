@@ -47,6 +47,19 @@ pub fn get_relationship(a: &User, b: &str) -> RelationshipStatus {
     RelationshipStatus::None
 }
 
+/// Find the note `a` holds against their own relationship entry for `b`
+///
+/// This only ever reads `a`'s own `relations` array (never `b`'s), so it can
+/// only surface a note to the recipient of an Incoming request.
+pub fn get_relationship_note(a: &User, b: &str) -> Option<String> {
+    a.relations
+        .as_ref()?
+        .iter()
+        .find(|x| x.id == b && x.status == RelationshipStatus::Incoming)?
+        .note
+        .clone()
+}
+
 /// Internal helper function for calculating permission
 async fn calculate_permission(data: &mut PermissionCalculator<'_>, db: &crate::Database) -> u32 {
     let user = data.user.get().unwrap();

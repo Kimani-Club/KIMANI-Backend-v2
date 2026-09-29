@@ -3,7 +3,7 @@ use crate::models::user::{
     Badges, FieldsUser, PartialUser, Presence, RelationshipStatus, User, UserHint,
 };
 use crate::permissions::defn::UserPerms;
-use crate::permissions::r#impl::user::get_relationship;
+use crate::permissions::r#impl::user::{get_relationship, get_relationship_note};
 use crate::{perms, Database, Error, Result};
 
 use futures::try_join;
@@ -80,6 +80,7 @@ impl User {
     pub fn foreign(mut self) -> User {
         self.profile = None;
         self.relations = None;
+        self.relationship_note = None;
 
         let mut badges = self.badges.unwrap_or(0);
         if let Ok(id) = ulid::Ulid::from_string(&self.id) {
@@ -127,6 +128,12 @@ impl User {
         if user.relationship.is_none() {
             user.relationship = Some(get_relationship(perspective, &user.id));
         }
+
+        user.relationship_note = if user.relationship == Some(RelationshipStatus::Incoming) {
+            get_relationship_note(perspective, &user.id)
+        } else {
+            None
+        };
 
         user
     }
@@ -295,6 +302,18 @@ impl User {
         }
     }
 
+    /// Build the existing private event payload from the new state, not stale relations.
+    fn relationship_payload(self, status: RelationshipStatus, note: Option<String>) -> Self {
+        let mut user = self.foreign();
+        user.relationship_note = if status == RelationshipStatus::Incoming {
+            note
+        } else {
+            None
+        };
+        user.relationship = Some(status);
+        user
+    }
+
     /// Apply a certain relationship between two users
     pub async fn apply_relationship(
         &self,
@@ -302,8 +321,14 @@ impl User {
         target: &mut User,
         local: RelationshipStatus,
         remote: RelationshipStatus,
+        note: Option<String>,
     ) -> Result<()> {
-        if let Err(e) = db.set_relationship(&self.id, &target.id, &local).await {
+        // The note (if any) belongs solely to the recipient's own `Incoming`
+        // entry — never mirrored onto the sender's `Outgoing` entry below.
+        if let Err(e) = db
+            .set_relationship(&self.id, &target.id, &local, None)
+            .await
+        {
             return Err(Error::DatabaseError {
                 operation: "update_one",
                 with: "user",
@@ -311,7 +336,10 @@ impl User {
         }
 
         // Await second operation
-        if let Err(e) = db.set_relationship(&target.id, &self.id, &remote).await {
+        if let Err(e) = db
+            .set_relationship(&target.id, &self.id, &remote, note.as_deref())
+            .await
+        {
             return Err(Error::DatabaseError {
                 operation: "update_one",
                 with: "user",
@@ -320,7 +348,7 @@ impl User {
 
         EventV1::UserRelationship {
             id: target.id.clone(),
-            user: self.clone().with_relationship(target),
+            user: self.clone().relationship_payload(remote.clone(), note),
             status: remote,
         }
         .private(target.id.clone())
@@ -328,18 +356,30 @@ impl User {
 
         EventV1::UserRelationship {
             id: self.id.clone(),
-            user: target.clone().with_relationship(self),
+            user: target.clone().relationship_payload(local.clone(), None),
             status: local.clone(),
         }
         .private(self.id.clone())
         .await;
 
         target.relationship.replace(local);
+        target.relationship_note = None;
         Ok(())
     }
 
     /// Add another user as a friend
-    pub async fn add_friend(&self, db: &Database, target: &mut User) -> Result<()> {
+    ///
+    /// `note` is an optional message attached by the sender, shown to the
+    /// recipient alongside their incoming request. It is only meaningful
+    /// (and only ever persisted) on a fresh `None -> Outgoing/Incoming`
+    /// request; accepting an existing `Incoming` request carries no note of
+    /// its own here since one was already stored when the request arrived.
+    pub async fn add_friend(
+        &self,
+        db: &Database,
+        target: &mut User,
+        note: Option<String>,
+    ) -> Result<()> {
         match get_relationship(self, &target.id) {
             RelationshipStatus::User => Err(Error::NoEffect),
             RelationshipStatus::Friend => Err(Error::AlreadyFriends),
@@ -352,6 +392,7 @@ impl User {
                     target,
                     RelationshipStatus::Friend,
                     RelationshipStatus::Friend,
+                    None,
                 )
                 .await
             }
@@ -361,6 +402,7 @@ impl User {
                     target,
                     RelationshipStatus::Outgoing,
                     RelationshipStatus::Incoming,
+                    note,
                 )
                 .await
             }
@@ -378,6 +420,7 @@ impl User {
                     target,
                     RelationshipStatus::None,
                     RelationshipStatus::None,
+                    None,
                 )
                 .await
             }
@@ -395,6 +438,7 @@ impl User {
                     target,
                     RelationshipStatus::Blocked,
                     RelationshipStatus::Blocked,
+                    None,
                 )
                 .await
             }
@@ -407,6 +451,7 @@ impl User {
                     target,
                     RelationshipStatus::Blocked,
                     RelationshipStatus::BlockedOther,
+                    None,
                 )
                 .await
             }
@@ -423,6 +468,7 @@ impl User {
                         target,
                         RelationshipStatus::BlockedOther,
                         RelationshipStatus::Blocked,
+                        None,
                     )
                     .await
                 }
@@ -432,6 +478,7 @@ impl User {
                         target,
                         RelationshipStatus::None,
                         RelationshipStatus::None,
+                        None,
                     )
                     .await
                 }
@@ -500,3 +547,220 @@ pub static DISCRIMINATOR_SEARCH_SPACE_QUARK: Lazy<HashSet<String>> = Lazy::new(|
 
     set.into_iter().collect()
 });
+
+#[cfg(test)]
+mod friend_request_tests {
+    use super::*;
+    use crate::models::user::Relationship;
+    use serde_json::{json, to_value};
+
+    fn user(id: &str) -> User {
+        User {
+            id: id.into(),
+            ..Default::default()
+        }
+    }
+
+    #[async_std::test]
+    async fn note_does_not_grant_send_message() {
+        let db = crate::DatabaseInfo::Dummy.connect().await.unwrap();
+        let sender = user("sender");
+        for status in [
+            RelationshipStatus::Incoming,
+            RelationshipStatus::Outgoing,
+            RelationshipStatus::Friend,
+            RelationshipStatus::Blocked,
+        ] {
+            let mut recipient = user("recipient");
+            for note in [None, Some("private note".into())] {
+                recipient.relations = Some(vec![Relationship {
+                    id: sender.id.clone(),
+                    status: status.clone(),
+                    note,
+                }]);
+                let permission = crate::perms(&recipient).user(&sender).calc_user(&db).await;
+                assert_eq!(
+                    permission.get_send_message(),
+                    status == RelationshipStatus::Friend
+                );
+            }
+        }
+        assert_eq!(crate::UserPermission::SendMessage as u32, 4);
+    }
+
+    /// Run against an isolated MongoDB and Redis, never a production database.
+    #[async_std::test]
+    #[ignore = "requires FRIEND_NOTE_TEST_MONGODB and isolated REDIS_URI"]
+    async fn friend_request_mongo_transitions() {
+        let uri = std::env::var("FRIEND_NOTE_TEST_MONGODB").expect("isolated test MongoDB URI");
+        let db = crate::DatabaseInfo::MongoDb(uri).connect().await.unwrap();
+        for action in [
+            "accept",
+            "reject",
+            "cancel",
+            "block_recipient",
+            "block_sender",
+            "without_note",
+        ] {
+            let sender_id = ulid::Ulid::new().to_string();
+            let recipient_id = ulid::Ulid::new().to_string();
+            let sender = user(&sender_id);
+            let mut recipient = user(&recipient_id);
+            db.insert_user(&sender).await.unwrap();
+            db.insert_user(&recipient).await.unwrap();
+            let note = if action == "without_note" {
+                None
+            } else {
+                Some("$literal note".into())
+            };
+            sender
+                .add_friend(&db, &mut recipient, note.clone())
+                .await
+                .unwrap();
+            let mut sender = db.fetch_user(&sender_id).await.unwrap();
+            let mut recipient = db.fetch_user(&recipient_id).await.unwrap();
+            assert_eq!(
+                get_relationship(&sender, &recipient_id),
+                RelationshipStatus::Outgoing
+            );
+            assert_eq!(
+                get_relationship(&recipient, &sender_id),
+                RelationshipStatus::Incoming
+            );
+            assert_eq!(get_relationship_note(&recipient, &sender_id), note);
+            assert!(get_relationship_note(&sender, &recipient_id).is_none());
+            assert!(sender.relations.as_ref().unwrap()[0].note.is_none());
+            match action {
+                "accept" => recipient.add_friend(&db, &mut sender, None).await.unwrap(),
+                "reject" => recipient.remove_friend(&db, &mut sender).await.unwrap(),
+                "cancel" => sender.remove_friend(&db, &mut recipient).await.unwrap(),
+                "block_recipient" => recipient.block_user(&db, &mut sender).await.unwrap(),
+                "block_sender" => sender.block_user(&db, &mut recipient).await.unwrap(),
+                _ => (),
+            }
+            let sender = db.fetch_user(&sender_id).await.unwrap();
+            let recipient = db.fetch_user(&recipient_id).await.unwrap();
+            if action == "accept" {
+                assert_eq!(
+                    get_relationship(&sender, &recipient_id),
+                    RelationshipStatus::Friend
+                );
+                assert_eq!(
+                    get_relationship(&recipient, &sender_id),
+                    RelationshipStatus::Friend
+                );
+            }
+            for user in [&sender, &recipient] {
+                assert!(user
+                    .relations
+                    .as_ref()
+                    .map_or(true, |rs| rs.iter().all(|r| r.note.is_none())));
+            }
+            db.delete_user(&sender_id).await.unwrap();
+            db.delete_user(&recipient_id).await.unwrap();
+        }
+    }
+
+    #[test]
+    fn recipient_only_and_foreign_privacy() {
+        let sender = user("sender");
+        let mut recipient = user("recipient");
+        recipient.relations = Some(vec![Relationship {
+            id: sender.id.clone(),
+            status: RelationshipStatus::Incoming,
+            note: Some("private note".into()),
+        }]);
+        assert_eq!(
+            sender
+                .clone()
+                .with_relationship(&recipient)
+                .relationship_note
+                .as_deref(),
+            Some("private note")
+        );
+        assert!(recipient
+            .clone()
+            .with_relationship(&sender)
+            .relationship_note
+            .is_none());
+        // HTTP accept response holds the new status but its viewer still has the old relation.
+        let accepted = sender
+            .clone()
+            .relationship_payload(RelationshipStatus::Friend, None);
+        assert!(accepted
+            .with_relationship(&recipient)
+            .relationship_note
+            .is_none());
+        assert!(sender
+            .clone()
+            .with_relationship(&user("third"))
+            .relationship_note
+            .is_none());
+        for status in [
+            RelationshipStatus::Outgoing,
+            RelationshipStatus::Friend,
+            RelationshipStatus::None,
+            RelationshipStatus::Blocked,
+            RelationshipStatus::BlockedOther,
+        ] {
+            recipient.relations.as_mut().unwrap()[0].status = status;
+            assert!(sender
+                .clone()
+                .with_relationship(&recipient)
+                .relationship_note
+                .is_none());
+        }
+        let mut stale = sender;
+        stale.relationship_note = Some("stale".into());
+        assert!(stale.foreign().relationship_note.is_none());
+    }
+
+    #[test]
+    fn existing_event_payload_uses_new_status_and_clears_note() {
+        for (id, status, note) in [
+            (
+                "recipient",
+                RelationshipStatus::Incoming,
+                Some("private note".to_string()),
+            ),
+            ("sender", RelationshipStatus::Outgoing, None),
+            ("recipient", RelationshipStatus::Friend, None),
+            ("recipient", RelationshipStatus::None, None),
+            ("sender", RelationshipStatus::None, None),
+            ("recipient", RelationshipStatus::Blocked, None),
+            ("sender", RelationshipStatus::BlockedOther, None),
+        ] {
+            let payload = user("other").relationship_payload(status.clone(), note.clone());
+            let event = to_value(EventV1::UserRelationship {
+                id: id.into(),
+                user: payload,
+                status: status.clone(),
+            })
+            .unwrap();
+            assert_eq!(event["type"], json!("UserRelationship"));
+            assert_eq!(event["id"], json!(id));
+            assert_eq!(event["status"], to_value(status).unwrap());
+            assert_eq!(event["user"]["relationship"], event["status"]);
+            assert_eq!(
+                event["user"].get("relationship_note").cloned(),
+                note.map(|note| json!(note))
+            );
+            assert!(event["user"].get("relations").is_none());
+        }
+    }
+
+    #[test]
+    fn persisted_schema_roundtrip_preserves_note_across_models() {
+        let document = json!({"_id":"sender","status":"Incoming","note":"private note"});
+        let old: Relationship = serde_json::from_value(document.clone()).unwrap();
+        assert_eq!(to_value(old).unwrap(), document);
+        let core: revolt_database::Relationship = serde_json::from_value(document.clone()).unwrap();
+        assert_eq!(to_value(&core).unwrap(), document);
+        let api: revolt_models::v0::Relationship = core.into();
+        assert_eq!(to_value(api).unwrap(), document);
+        let legacy: Relationship =
+            serde_json::from_value(json!({"_id":"sender","status":"Incoming"})).unwrap();
+        assert!(legacy.note.is_none());
+        assert!(to_value(legacy).unwrap().get("note").is_none());
+    }
+}
