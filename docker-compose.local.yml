@@ -62,7 +62,7 @@ services:
     restart: always
 
   delta:
-    image: rust:1.78-bullseye
+    image: rust:1.78-bookworm
     working_dir: /workspace
     volumes:
       - .:/workspace
@@ -94,7 +94,7 @@ services:
       - "8001:8000"
 
   bonfire:
-    image: rust:1.78-bullseye
+    image: rust:1.78-bookworm
     working_dir: /workspace
     volumes:
       - .:/workspace

@@ -1,5 +1,5 @@
 # Build Stage
-FROM --platform="${BUILDPLATFORM}" rust:1.78-bullseye
+FROM --platform="${BUILDPLATFORM}" rust:1.78-bookworm
 USER 0:0
 WORKDIR /home/rust/src
 
