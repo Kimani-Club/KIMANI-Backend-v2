@@ -16,6 +16,7 @@ pub struct ProtocolConfiguration {
     protocol_version: i32,
     format: ProtocolFormat,
     session_token: Option<String>,
+    auth0_token: Option<String>,
 }
 
 impl ProtocolConfiguration {
@@ -29,6 +30,7 @@ impl ProtocolConfiguration {
             protocol_version,
             format,
             session_token,
+            auth0_token: None,
         }
     }
 
@@ -68,6 +70,12 @@ impl ProtocolConfiguration {
     pub fn set_session_token(&mut self, token: String) {
         self.session_token.replace(token);
     }
+
+    /// Optional Auth0 proof travels in the Authenticate frame, never in the URL.
+    pub fn set_auth0_token(&mut self, token: Option<String>) { self.auth0_token = token; }
+
+    /// Returns the supplemental platform-authority proof.
+    pub fn get_auth0_token(&self) -> Option<&str> { self.auth0_token.as_deref() }
 
     /// Get the current session token
     pub fn get_session_token(&self) -> &Option<String> {
@@ -139,6 +147,7 @@ impl handshake::server::Callback for WebsocketHandshakeCallback {
                 protocol_version,
                 format,
                 session_token,
+                auth0_token: None,
             })
             .is_ok()
         {
