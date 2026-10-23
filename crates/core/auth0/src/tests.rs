@@ -79,7 +79,7 @@ fn sign(claims: &Value) -> String {
 }
 
 #[async_std::test]
-async fn valid_admin_is_bound_to_the_revolt_session_account() {
+async fn a_valid_proof_is_bound_to_the_revolt_session_account() {
     let (verifier, _) = setup();
     let token = sign(&claims());
     assert!(
@@ -87,7 +87,7 @@ async fn valid_admin_is_bound_to_the_revolt_session_account() {
             .verify(&token, "kimani-account")
             .await
             .unwrap()
-            .is_admin
+            .is_privileged
     );
     assert!(verifier.verify(&token, "another-account").await.is_err());
 }
@@ -126,17 +126,15 @@ async fn standard_claims_are_required_and_checked() {
 }
 
 #[async_std::test]
-async fn legacy_flags_and_other_roles_do_not_grant_admin() {
+async fn legacy_flags_and_role_names_do_not_grant_privilege() {
     let (verifier, _) = setup();
-    for roles in [
+    for permissions in [
         json!([]),
-        json!(["staff"]),
-        json!(["ambassador"]),
-        json!(["member"]),
-        json!("admin"),
+        json!(["communities:manage"]),
+        json!("revolt:privileged"),
     ] {
         let mut c = claims();
-        c["https://kimanilife.com/claims/roles"] = roles;
+        c["permissions"] = permissions;
         c["privileged"] = json!(true);
         c["roles"] = json!(["admin"]);
         assert!(
@@ -144,7 +142,7 @@ async fn legacy_flags_and_other_roles_do_not_grant_admin() {
                 .verify(&sign(&c), "kimani-account")
                 .await
                 .unwrap()
-                .is_admin
+                .is_privileged
         );
     }
 }
@@ -203,7 +201,7 @@ async fn rotation_fetches_the_new_key_after_the_refresh_backoff() {
             .verify(&sign_with_kid(&claims(), "rotated"), "kimani-account")
             .await
             .unwrap()
-            .is_admin
+            .is_privileged
     );
     assert_eq!(source.calls.load(Ordering::SeqCst), 2);
 }
@@ -223,12 +221,10 @@ fn non_bearer_authorization_headers_are_not_proofs() {
     assert_eq!(bearer(Some("bearer abc.def.ghi")), Some("abc.def.ghi"));
 }
 
-#[async_std::test]
-async fn a_supplied_token_without_auth0_config_grants_nothing_instead_of_failing() {
-    // The test environment has no AUTH0_* variables, so the global verifier is disabled.
-    assert!(authority(Some(&sign(&claims())), "kimani-account")
-        .await
-        .is_none());
+#[test]
+fn a_missing_auth0_config_disables_elevation_instead_of_failing() {
+    // Built from an explicit config error, never from the process environment or the network.
+    assert!(http_verifier(Err("Missing AUTH0_ISSUER or AUTH0_DOMAIN")).is_none());
 }
 
 #[async_std::test]
@@ -343,18 +339,54 @@ async fn a_slow_jwks_refresh_does_not_block_readers_with_known_keys() {
 }
 
 #[async_std::test]
-async fn admin_role_alone_does_not_enable_the_deferred_user_editing_task() {
+async fn privilege_comes_from_the_permission_whatever_the_role() {
     let (verifier, _) = setup();
-    let mut c = claims();
-    c.as_object_mut().unwrap().remove("permissions");
-    let authority = verifier.verify(&sign(&c), "kimani-account").await.unwrap();
-    assert!(authority.is_admin);
-    assert!(!authority.is_privileged);
+    let mut staff = claims();
+    staff["https://kimanilife.com/claims/roles"] = json!(["staff"]);
     assert!(
         verifier
-            .verify(&sign(&claims()), "kimani-account")
+            .verify(&sign(&staff), "kimani-account")
             .await
             .unwrap()
             .is_privileged
     );
+    let mut admin_without_permission = claims();
+    admin_without_permission
+        .as_object_mut()
+        .unwrap()
+        .remove("permissions");
+    assert!(
+        !verifier
+            .verify(&sign(&admin_without_permission), "kimani-account")
+            .await
+            .unwrap()
+            .is_privileged
+    );
+}
+
+#[async_std::test]
+async fn last_good_keys_stop_working_after_the_max_stale_age() {
+    let (verifier, source) = setup();
+    verifier
+        .verify(&sign(&claims()), "kimani-account")
+        .await
+        .unwrap();
+    source.fail.store(true, Ordering::SeqCst);
+    {
+        let mut cache = verifier.cache();
+        let too_old = Instant::now()
+            .checked_sub(JWKS_MAX_STALE + Duration::from_secs(1))
+            .unwrap();
+        cache.fetched_at = Some(too_old);
+        cache.attempted_at = Some(too_old);
+    }
+    let token = sign(&claims());
+    assert_eq!(
+        verifier.verify(&token, "kimani-account").await.err(),
+        Some(Rejection::UnknownKey)
+    );
+    assert!(verifier
+        .authority(Some(&token), "kimani-account")
+        .await
+        .is_none());
 }

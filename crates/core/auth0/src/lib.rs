@@ -14,8 +14,12 @@ use std::{
 
 const JWKS_TTL: Duration = Duration::from_secs(600);
 const JWKS_REFRESH_MIN: Duration = Duration::from_secs(30);
+/// Last-good keys outlive the TTL only this long while Auth0 is unreachable, so a key
+/// revoked during an outage stops granting privilege within a bounded time.
+const JWKS_MAX_STALE: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_TOKEN_BYTES: usize = 32_768;
 const MAX_JWKS_KEYS: usize = 100;
+const PRIVILEGED_PERMISSION: &str = "revolt:privileged";
 
 /// Public tenant settings; secrets and Management API access are not needed.
 pub struct Config {
@@ -108,13 +112,14 @@ struct KeyCache {
 }
 
 impl KeyCache {
-    /// Returns the key for `kid` and whether it is still within the JWKS TTL.
+    /// Returns the key for `kid` and whether it is still within the JWKS TTL;
+    /// keys older than `JWKS_MAX_STALE` are treated as gone.
     fn get(&self, kid: &str, now: Instant) -> Option<(DecodingKey, bool)> {
-        let fresh = self
-            .fetched_at
-            .map(|at| now.duration_since(at) < JWKS_TTL)
-            .unwrap_or(false);
-        self.keys.get(kid).map(|key| (key.clone(), fresh))
+        let age = now.duration_since(self.fetched_at?);
+        if age >= JWKS_MAX_STALE {
+            return None;
+        }
+        self.keys.get(kid).map(|key| (key.clone(), age < JWKS_TTL))
     }
 }
 
@@ -132,7 +137,6 @@ pub enum Rejection {
 
 /// A verified proof is tied to the already authenticated Revolt account.
 pub struct Authority {
-    pub is_admin: bool,
     pub is_privileged: bool,
     pub expires_at: u64,
 }
@@ -267,23 +271,16 @@ impl Verifier {
         {
             return Err(Rejection::AccountMismatch);
         }
-        let role_key = format!("{}/roles", self.config.claims_ns);
-        let is_admin = claims
-            .get(&role_key)
+        // Authorization is by permission, never by role name: Auth0 decides which roles carry it.
+        let is_privileged = claims
+            .get("permissions")
             .and_then(Value::as_array)
-            .map(|roles| roles.iter().any(|r| r.as_str() == Some("admin")))
+            .map(|permissions| {
+                permissions
+                    .iter()
+                    .any(|p| p.as_str() == Some(PRIVILEGED_PERMISSION))
+            })
             .unwrap_or(false);
-        // This stage migrates existing powers; enabling user editing for every admin is a separate task.
-        let is_privileged = is_admin
-            && claims
-                .get("permissions")
-                .and_then(Value::as_array)
-                .map(|permissions| {
-                    permissions
-                        .iter()
-                        .any(|p| p.as_str() == Some("revolt:privileged"))
-                })
-                .unwrap_or(false);
         let expires_at = claims
             .get("exp")
             .and_then(Value::as_u64)
@@ -292,7 +289,6 @@ impl Verifier {
             return Err(Rejection::Expired);
         }
         Ok(Authority {
-            is_admin,
             is_privileged,
             expires_at,
         })
@@ -320,31 +316,35 @@ impl Verifier {
     }
 }
 
-static VERIFIER: Lazy<Result<Verifier, &'static str>> = Lazy::new(|| {
-    let config = Config::from_env().map_err(|reason| {
-        log::warn!("Auth0 verification disabled, no session will be elevated: {reason}");
-        reason
-    })?;
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|_| "Invalid Auth0 HTTP configuration")?;
-    let source = Arc::new(HttpKeys {
-        client,
-        uri: config.jwks_uri.clone(),
+static VERIFIER: Lazy<Option<Verifier>> = Lazy::new(|| http_verifier(Config::from_env()));
+
+/// Builds the production verifier; a missing or invalid config disables elevation, not sessions.
+fn http_verifier(config: Result<Config, &'static str>) -> Option<Verifier> {
+    let built = config.and_then(|config| {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|_| "Invalid Auth0 HTTP configuration")?;
+        let source = Arc::new(HttpKeys {
+            client,
+            uri: config.jwks_uri.clone(),
+        });
+        Ok(Verifier::new(config, source))
     });
-    Ok(Verifier::new(config, source))
-});
+    match built {
+        Ok(verifier) => Some(verifier),
+        Err(reason) => {
+            log::warn!("Auth0 verification disabled, no session will be elevated: {reason}");
+            None
+        }
+    }
+}
 
 /// Normal sessions keep working without Auth0; only a valid proof for that session elevates it.
 pub async fn authority(token: Option<&str>, expected_account: &str) -> Option<Authority> {
     token?;
-    VERIFIER
-        .as_ref()
-        .ok()?
-        .authority(token, expected_account)
-        .await
+    VERIFIER.as_ref()?.authority(token, expected_account).await
 }
 
 /// Extracts a Bearer token; any other `Authorization` value (e.g. Basic) is simply not a proof.
