@@ -37,18 +37,10 @@ impl<'r> FromRequest<'r> for User {
 
         if let Some(user) = user {
             let mut user = user.clone();
-            let proof = match kimani_auth0::bearer(request.headers().get_one("Authorization")) {
-                Ok(token) => kimani_auth0::authority(token, &user.id).await,
-                Err(()) => Err(()),
-            };
-            match proof {
-                Ok(authority) => {
-                    user.privileged = user.bot.is_none() && authority.map(|a| a.is_privileged).unwrap_or(false);
-                }
-                // The Revolt session is valid: reject the supplemental authority without
-                // telling the app that its ordinary chat session has been revoked.
-                Err(()) => return Outcome::Failure((Status::Forbidden, authifier::Error::InvalidSession)),
-            }
+            // An absent or unverifiable Auth0 proof only means "no elevation", never a failed request.
+            let token = kimani_auth0::bearer(request.headers().get_one("Authorization"));
+            let authority = kimani_auth0::authority(token, &user.id).await;
+            user.privileged = user.bot.is_none() && authority.map(|a| a.is_privileged).unwrap_or(false);
             Outcome::Success(user)
         } else {
             Outcome::Failure((Status::Unauthorized, authifier::Error::InvalidSession))

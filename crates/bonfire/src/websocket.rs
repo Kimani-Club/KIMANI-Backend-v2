@@ -63,13 +63,8 @@ pub fn spawn_client(db: &'static Database, stream: TcpStream, addr: SocketAddr) 
                 if let Some(token) = config.get_session_token().as_ref() {
                     match User::from_token(db, token, UserHint::Any).await {
                         Ok(mut user) => {
-                            let authority = match kimani_auth0::authority(config.get_auth0_token(), &user.id).await {
-                                Ok(proof) => proof,
-                                Err(()) => {
-                                    write.lock().await.send(config.encode(&revolt_quark::Error::NotPrivileged)).await.ok();
-                                    return;
-                                }
-                            };
+                            // An unverifiable `auth0_token` connects the socket without elevation.
+                            let authority = kimani_auth0::authority(config.get_auth0_token(), &user.id).await;
                             user.privileged = user.bot.is_none() && authority.as_ref().map(|a| a.is_privileged).unwrap_or(false);
                             let authority_expiry = if user.privileged { authority.map(|a| a.expires_at) } else { None };
                             info!("User {addr:?} authenticated as @{}", user.username);
@@ -226,7 +221,10 @@ pub fn spawn_client(db: &'static Database, stream: TcpStream, addr: SocketAddr) 
                                     }
                                     .fuse();
 
-                                // An elevated socket must reconnect with a fresh proof when the JWT expires.
+                                // An elevated socket closes when its JWT expires so the client reconnects
+                                // with a fresh proof (or as a normal member). Dropping the flag in place is
+                                // not enough: privilege decided which channels went into Ready and which
+                                // topics this socket subscribed to, and the client keeps what it received.
                                 let expiry = async {
                                     if let Some(exp) = authority_expiry {
                                         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)

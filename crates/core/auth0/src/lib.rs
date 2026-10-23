@@ -1,18 +1,21 @@
 //! Auth0 is the only source of platform authority. Mongo remains the profile store.
 use async_trait::async_trait;
-use futures::lock::Mutex;
-use jsonwebtoken::{decode, decode_header, jwk::JwkSet, Algorithm, DecodingKey, Validation};
+use futures::lock::Mutex as AsyncMutex;
+use jsonwebtoken::{
+    decode, decode_header, errors::ErrorKind, jwk::JwkSet, Algorithm, DecodingKey, Validation,
+};
 use once_cell::sync::Lazy;
 use serde_json::Value;
 use std::{
     collections::HashMap,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 const JWKS_TTL: Duration = Duration::from_secs(600);
 const JWKS_REFRESH_MIN: Duration = Duration::from_secs(30);
 const MAX_TOKEN_BYTES: usize = 32_768;
+const MAX_JWKS_KEYS: usize = 100;
 
 /// Public tenant settings; secrets and Management API access are not needed.
 pub struct Config {
@@ -104,6 +107,29 @@ struct KeyCache {
     attempted_at: Option<Instant>,
 }
 
+impl KeyCache {
+    /// Returns the key for `kid` and whether it is still within the JWKS TTL.
+    fn get(&self, kid: &str, now: Instant) -> Option<(DecodingKey, bool)> {
+        let fresh = self
+            .fetched_at
+            .map(|at| now.duration_since(at) < JWKS_TTL)
+            .unwrap_or(false);
+        self.keys.get(kid).map(|key| (key.clone(), fresh))
+    }
+}
+
+/// Why a supplied proof grants nothing; logged, never shown to the client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rejection {
+    Oversized,
+    Malformed,
+    Algorithm,
+    UnknownKey,
+    Invalid,
+    AccountMismatch,
+    Expired,
+}
+
 /// A verified proof is tied to the already authenticated Revolt account.
 pub struct Authority {
     pub is_admin: bool,
@@ -115,7 +141,10 @@ pub struct Authority {
 pub struct Verifier {
     config: Config,
     source: Arc<dyn KeySource>,
+    /// Held only for map reads/swaps, never across the network fetch.
     cache: Mutex<KeyCache>,
+    /// Single-flight JWKS refresh: one request fetches while the others use the last good keys.
+    refresh: AsyncMutex<()>,
 }
 impl Verifier {
     /// Callers can inject a key source without replacing the JWT verification itself.
@@ -124,34 +153,61 @@ impl Verifier {
             config,
             source,
             cache: Mutex::new(KeyCache::default()),
+            refresh: AsyncMutex::new(()),
         }
     }
 
-    async fn key(&self, kid: &str) -> Result<DecodingKey, ()> {
-        let mut cache = self.cache.lock().await;
+    fn cache(&self) -> std::sync::MutexGuard<'_, KeyCache> {
+        self.cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    async fn key(&self, kid: &str) -> Result<DecodingKey, Rejection> {
+        let cached = self.cache().get(kid, Instant::now());
+        if let Some((key, true)) = cached {
+            return Ok(key);
+        }
+        let stale = cached.map(|(key, _)| key);
+        // Someone else is refreshing: a known (stale) key is good enough, otherwise wait for them.
+        let _refreshing = match self.refresh.try_lock() {
+            Some(guard) => guard,
+            None => match stale {
+                Some(key) => return Ok(key),
+                None => self.refresh.lock().await,
+            },
+        };
         let now = Instant::now();
-        let fresh = cache
-            .fetched_at
-            .map(|at| now.duration_since(at) < JWKS_TTL)
-            .unwrap_or(false);
-        if fresh {
-            if let Some(key) = cache.keys.get(kid) {
-                return Ok(key.clone());
-            }
-        }
-        // Unknown kid values must not turn an unauthenticated flood into a JWKS flood.
-        if cache
-            .attempted_at
-            .map(|at| now.duration_since(at) < JWKS_REFRESH_MIN)
-            .unwrap_or(false)
         {
-            return Err(());
+            let mut cache = self.cache();
+            // A refresh may have completed while this request waited.
+            if let Some((key, true)) = cache.get(kid, now) {
+                return Ok(key);
+            }
+            // Unknown kid values must not turn an unauthenticated flood into a JWKS flood.
+            if cache
+                .attempted_at
+                .map(|at| now.duration_since(at) < JWKS_REFRESH_MIN)
+                .unwrap_or(false)
+            {
+                return cache
+                    .get(kid, now)
+                    .map(|(key, _)| key)
+                    .ok_or(Rejection::UnknownKey);
+            }
+            cache.attempted_at = Some(now);
         }
-        cache.attempted_at = Some(now);
-        let set = self.source.fetch().await?;
-        if set.keys.len() > 100 {
-            return Err(());
-        }
+        let set = match self.source.fetch().await {
+            Ok(set) if set.keys.len() <= MAX_JWKS_KEYS => set,
+            _ => {
+                log::warn!("Auth0 JWKS refresh failed; keeping the last known keys");
+                return self
+                    .cache()
+                    .get(kid, now)
+                    .map(|(key, _)| key)
+                    .ok_or(Rejection::UnknownKey);
+            }
+        };
         let mut keys = HashMap::new();
         for jwk in &set.keys {
             if let Some(id) = &jwk.common.key_id {
@@ -160,24 +216,29 @@ impl Verifier {
                 }
             }
         }
+        let mut cache = self.cache();
         cache.keys = keys;
         cache.fetched_at = Some(Instant::now());
-        cache.keys.get(kid).cloned().ok_or(())
+        cache.keys.get(kid).cloned().ok_or(Rejection::UnknownKey)
     }
 
     /// Verifies RS256, signature, expiry, issuer, audience, subject and the session/account binding.
-    pub async fn verify(&self, token: &str, expected_account: &str) -> Result<Authority, ()> {
+    pub async fn verify(
+        &self,
+        token: &str,
+        expected_account: &str,
+    ) -> Result<Authority, Rejection> {
         if token.len() > MAX_TOKEN_BYTES {
-            return Err(());
+            return Err(Rejection::Oversized);
         }
-        let header = decode_header(token).map_err(|_| ())?;
+        let header = decode_header(token).map_err(|_| Rejection::Malformed)?;
         if header.alg != Algorithm::RS256 {
-            return Err(());
+            return Err(Rejection::Algorithm);
         }
         let kid = header
             .kid
             .filter(|s| !s.is_empty() && s.len() <= 256)
-            .ok_or(())?;
+            .ok_or(Rejection::Malformed)?;
         let key = self.key(&kid).await?;
         let mut validation = Validation::new(Algorithm::RS256);
         validation.set_issuer(&[&self.config.issuer]);
@@ -186,7 +247,10 @@ impl Verifier {
         validation.leeway = 0;
         validation.validate_nbf = true;
         let claims = decode::<Value>(token, &key, &validation)
-            .map_err(|_| ())?
+            .map_err(|e| match e.kind() {
+                ErrorKind::ExpiredSignature => Rejection::Expired,
+                _ => Rejection::Invalid,
+            })?
             .claims;
         if claims
             .get("sub")
@@ -194,13 +258,14 @@ impl Verifier {
             .filter(|s| !s.is_empty())
             .is_none()
         {
-            return Err(());
+            return Err(Rejection::Invalid);
         }
+        // Security binding, deliberately without a `sub` fallback: the proof must name this Revolt account.
         let user_key = format!("{}/user_id", self.config.claims_ns);
         if expected_account.is_empty()
             || claims.get(&user_key).and_then(Value::as_str) != Some(expected_account)
         {
-            return Err(());
+            return Err(Rejection::AccountMismatch);
         }
         let role_key = format!("{}/roles", self.config.claims_ns);
         let is_admin = claims
@@ -219,9 +284,12 @@ impl Verifier {
                         .any(|p| p.as_str() == Some("revolt:privileged"))
                 })
                 .unwrap_or(false);
-        let expires_at = claims.get("exp").and_then(Value::as_u64).ok_or(())?;
+        let expires_at = claims
+            .get("exp")
+            .and_then(Value::as_u64)
+            .ok_or(Rejection::Invalid)?;
         if expires_at <= jsonwebtoken::get_current_timestamp() {
-            return Err(());
+            return Err(Rejection::Expired);
         }
         Ok(Authority {
             is_admin,
@@ -229,10 +297,34 @@ impl Verifier {
             expires_at,
         })
     }
+
+    /// A proof that fails verification only withholds elevation; the Revolt session stays valid.
+    /// Clients may send foreign or stale tokens (microservices HS tokens, expired Auth0 JWTs),
+    /// and failing the whole request or socket for that locked members out of chat.
+    pub async fn authority(
+        &self,
+        token: Option<&str>,
+        expected_account: &str,
+    ) -> Option<Authority> {
+        match self.verify(token?, expected_account).await {
+            Ok(authority) => Some(authority),
+            Err(Rejection::AccountMismatch) => {
+                log::warn!("Auth0 proof is bound to a different account than session user {expected_account}; ignored");
+                None
+            }
+            Err(reason) => {
+                log::debug!("Auth0 proof ignored for {expected_account}: {reason:?}");
+                None
+            }
+        }
+    }
 }
 
 static VERIFIER: Lazy<Result<Verifier, &'static str>> = Lazy::new(|| {
-    let config = Config::from_env()?;
+    let config = Config::from_env().map_err(|reason| {
+        log::warn!("Auth0 verification disabled, no session will be elevated: {reason}");
+        reason
+    })?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .redirect(reqwest::redirect::Policy::none())
@@ -245,34 +337,25 @@ static VERIFIER: Lazy<Result<Verifier, &'static str>> = Lazy::new(|| {
     Ok(Verifier::new(config, source))
 });
 
-/// Normal sessions keep working without Auth0; a supplied proof must validate and match that session.
-pub async fn authority(
-    token: Option<&str>,
-    expected_account: &str,
-) -> Result<Option<Authority>, ()> {
-    match token {
-        None => Ok(None),
-        Some(token) => VERIFIER
-            .as_ref()
-            .map_err(|_| ())?
-            .verify(token, expected_account)
-            .await
-            .map(Some),
-    }
+/// Normal sessions keep working without Auth0; only a valid proof for that session elevates it.
+pub async fn authority(token: Option<&str>, expected_account: &str) -> Option<Authority> {
+    token?;
+    VERIFIER
+        .as_ref()
+        .ok()?
+        .authority(token, expected_account)
+        .await
 }
 
-/// Header parsing rejects malformed proofs instead of silently downgrading them.
-pub fn bearer(header: Option<&str>) -> Result<Option<&str>, ()> {
-    match header {
-        None => Ok(None),
-        Some(value) => {
-            let token = value
-                .strip_prefix("Bearer ")
-                .filter(|s| !s.is_empty())
-                .ok_or(())?;
-            Ok(Some(token))
-        }
+/// Extracts a Bearer token; any other `Authorization` value (e.g. Basic) is simply not a proof.
+pub fn bearer(header: Option<&str>) -> Option<&str> {
+    let (scheme, token) = header?.split_once(' ')?;
+    let token = token.trim();
+    if !scheme.eq_ignore_ascii_case("Bearer") || token.is_empty() {
+        log::debug!("Ignoring a non-Bearer Authorization header");
+        return None;
     }
+    Some(token)
 }
 
 #[cfg(test)]

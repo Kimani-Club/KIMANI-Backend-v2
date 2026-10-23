@@ -1739,6 +1739,7 @@ dependencies = [
  "async-trait",
  "futures",
  "jsonwebtoken",
+ "log",
  "once_cell",
  "reqwest",
  "serde",
