@@ -72,6 +72,29 @@ async fn calculate_permission(data: &mut PermissionCalculator<'_>, db: &crate::D
         return u32::MAX;
     }
 
+    // Restricted members are shadowed: other members cannot find, view or contact them.
+    if user.is_restricted() {
+        return 0;
+    }
+
+    let permissions = calculate_relationship_permission(data, db).await;
+
+    // A restricted member may not start conversations or invite anyone; their
+    // only writable channel is a staff DM, which bypasses user permissions.
+    if data.perspective.is_restricted() {
+        permissions & !(UserPermission::SendMessage as u32 | UserPermission::Invite as u32)
+    } else {
+        permissions
+    }
+}
+
+/// Permission granted by the relationship / mutual connection between two users
+async fn calculate_relationship_permission(
+    data: &mut PermissionCalculator<'_>,
+    db: &crate::Database,
+) -> u32 {
+    let user = data.user.get().unwrap();
+
     let relationship = data.flag_known_relationship.cloned().unwrap_or_else(|| {
         user.relationship
             .as_ref()
@@ -114,4 +137,67 @@ async fn calculate_permission(data: &mut PermissionCalculator<'_>, db: &crate::D
     }
 
     permissions
+}
+
+#[cfg(test)]
+mod restricted_tests {
+    use crate::models::user::{Flags, Relationship, RelationshipStatus};
+    use crate::{perms, UserPermission};
+
+    use super::*;
+
+    fn user(id: &str) -> User {
+        User {
+            id: id.into(),
+            ..Default::default()
+        }
+    }
+
+    fn restricted(id: &str) -> User {
+        User {
+            flags: Some(Flags::Restricted as i32),
+            ..user(id)
+        }
+    }
+
+    fn friend_of(mut user: User, other: &str) -> User {
+        user.relations = Some(vec![Relationship {
+            id: other.into(),
+            status: RelationshipStatus::Friend,
+            note: None,
+        }]);
+        user
+    }
+
+    #[async_std::test]
+    async fn restricted_target_is_invisible_to_members_and_visible_to_staff() {
+        let db = crate::DatabaseInfo::Dummy.connect().await.unwrap();
+        let target = restricted("target");
+
+        let member = friend_of(user("member"), "target");
+        assert_eq!(perms(&member).user(&target).calc_user(&db).await.0[0], 0);
+        assert!(!target.is_visible_to(&member));
+
+        let staff = User {
+            privileged: true,
+            ..user("staff")
+        };
+        assert_eq!(perms(&staff).user(&target).calc_user(&db).await.0[0], u32::MAX);
+        assert!(target.is_visible_to(&staff));
+
+        assert_eq!(perms(&target).user(&target).calc_user(&db).await.0[0], u32::MAX);
+        assert!(target.is_visible_to(&target));
+    }
+
+    #[async_std::test]
+    async fn restricted_perspective_cannot_message_or_invite() {
+        let db = crate::DatabaseInfo::Dummy.connect().await.unwrap();
+        let friend = user("friend");
+        let me = friend_of(restricted("me"), "friend");
+
+        let permissions = perms(&me).user(&friend).calc_user(&db).await;
+        assert!(!permissions.get_send_message());
+        assert_eq!(permissions.0[0] & UserPermission::Invite as u32, 0);
+        assert_ne!(permissions.0[0] & UserPermission::Access as u32, 0);
+    }
 }

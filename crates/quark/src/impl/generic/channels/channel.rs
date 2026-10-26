@@ -50,6 +50,17 @@ impl Channel {
         matches!(self, Channel::DirectMessage { .. })
     }
 
+    /// Whether this is a DM opened by a privileged (staff) user, see [Channel::DirectMessage]
+    pub fn is_staff_dm(&self) -> bool {
+        matches!(
+            self,
+            Channel::DirectMessage {
+                staff_id: Some(_),
+                ..
+            }
+        )
+    }
+
     /// Create a channel
     pub async fn create(&self, db: &Database) -> Result<()> {
         db.insert_channel(self).await?;
@@ -151,9 +162,15 @@ impl Channel {
     pub fn apply_options(&mut self, partial: PartialChannel) {
         // ! FIXME: maybe flatten channel object?
         match self {
-            Self::DirectMessage { active, .. } => {
+            Self::DirectMessage {
+                active, staff_id, ..
+            } => {
                 if let Some(v) = partial.active {
                     *active = v;
+                }
+
+                if let Some(v) = partial.staff_id {
+                    staff_id.replace(v);
                 }
             }
             Self::Group {

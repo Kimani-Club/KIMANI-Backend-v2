@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use revolt_quark::{
     models::{Member, User},
     perms, Db, Error, Ref, Result,
@@ -43,7 +45,7 @@ pub async fn member_experimental_query(
     let server = target.as_server(db).await?;
     perms(&user).server(&server).calc(db).await?;
 
-    let mut members = db.fetch_all_members(&server.id).await?;
+    let members = db.fetch_all_members(&server.id).await?;
 
     let mut user_ids = vec![];
     for member in &members {
@@ -52,14 +54,12 @@ pub async fn member_experimental_query(
 
     let mut users = User::fetch_foreign_users(db, &user_ids).await?;
 
-    // Ensure the lists match up exactly
-    members.sort_by(|a, b| a.id.user.cmp(&b.id.user));
-    users.sort_by(|a, b| a.id.cmp(&b.id));
+    // Shadow restricted members from non-privileged viewers.
+    User::retain_visible(&user, &mut users);
 
     // Filter all matches
-    let mut zipped_vec: Vec<(Member, User)> = members
+    let mut zipped_vec: Vec<(Member, User)> = pair_by_user_id(members, users)
         .into_iter()
-        .zip(users)
         .filter(|(member, user)| {
             if let Some(nickname) = &member.nickname {
                 nickname.contains(&options.query)
@@ -79,4 +79,66 @@ pub async fn member_experimental_query(
     // Take the first five and return them
     let (members, users) = zipped_vec.into_iter().take(10).unzip();
     Ok(Json(MemberQueryResponse { members, users }))
+}
+
+/// Pair each member with its user by id, dropping members without a user.
+///
+/// `fetch_users` skips suspended, restricted-for-this-viewer and unreadable
+/// documents, so a positional zip of the two sorted lists paired members
+/// with the wrong users as soon as one was missing.
+fn pair_by_user_id(members: Vec<Member>, users: Vec<User>) -> Vec<(Member, User)> {
+    let mut users: HashMap<String, User> =
+        users.into_iter().map(|user| (user.id.clone(), user)).collect();
+
+    members
+        .into_iter()
+        .filter_map(|member| {
+            users
+                .remove(&member.id.user)
+                .map(|user| (member, user))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use revolt_quark::models::server_member::MemberCompositeKey;
+    use revolt_quark::Timestamp;
+
+    use super::*;
+
+    fn member(user_id: &str) -> Member {
+        Member {
+            id: MemberCompositeKey {
+                server: "server".to_string(),
+                user: user_id.to_string(),
+            },
+            joined_at: Timestamp::UNIX_EPOCH,
+            nickname: None,
+            avatar: None,
+            roles: vec![],
+            timeout: None,
+        }
+    }
+
+    fn user(id: &str) -> User {
+        User {
+            id: id.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn missing_user_does_not_shift_the_pairs() {
+        let members = vec![member("a"), member("b"), member("c")];
+        let users = vec![user("a"), user("c")];
+
+        let pairs = pair_by_user_id(members, users);
+
+        let ids: Vec<(&str, &str)> = pairs
+            .iter()
+            .map(|(m, u)| (m.id.user.as_str(), u.id.as_str()))
+            .collect();
+        assert_eq!(ids, vec![("a", "a"), ("c", "c")]);
+    }
 }

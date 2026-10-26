@@ -88,11 +88,13 @@ impl From<crate::Channel> for Channel {
                 active,
                 recipients,
                 last_message_id,
+                staff_id,
             } => Channel::DirectMessage {
                 id,
                 active,
                 recipients,
                 last_message_id,
+                staff_id,
             },
             crate::Channel::Group {
                 id,

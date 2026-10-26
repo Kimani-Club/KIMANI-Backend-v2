@@ -164,6 +164,11 @@ impl State {
             .await?,
         );
 
+        // Shadow restricted members from non-privileged viewers: they are left out
+        // of the payload and, below, never subscribed to.
+        let mut users = users;
+        User::retain_visible(&user, &mut users);
+
         // Copy data into local state cache.
         self.cache.users = users.iter().cloned().map(|x| (x.id.clone(), x)).collect();
         self.cache
@@ -288,8 +293,11 @@ impl State {
     }
 
     /// Push presence change to the user and all associated server topics
+    ///
+    /// A restricted (shadowed) user's presence only goes to their own topic.
     pub async fn broadcast_presence_change(&self, target: bool) {
-        if if let Some(status) = &self.cache.users.get(&self.cache.user_id).unwrap().status {
+        let user = self.cache.users.get(&self.cache.user_id).unwrap();
+        if if let Some(status) = &user.status {
             status.presence != Some(Presence::Invisible)
         } else {
             true
@@ -304,8 +312,10 @@ impl State {
                 event_id: Some(ulid::Ulid::new().to_string()),
             };
 
-            for server in self.cache.servers.keys() {
-                event.clone().p(server.clone()).await;
+            if !user.is_restricted() {
+                for server in self.cache.servers.keys() {
+                    event.clone().p(server.clone()).await;
+                }
             }
 
             event.p(self.cache.user_id.clone()).await;
@@ -509,7 +519,9 @@ impl State {
                 }
             }
 
-            EventV1::UserUpdate { event_id, .. } => {
+            EventV1::UserUpdate {
+                id, data, event_id, ..
+            } => {
                 if let Some(id) = event_id {
                     if self.cache.seen_events.contains(id) {
                         return false;
@@ -519,6 +531,16 @@ impl State {
                 }
 
                 *event_id = None;
+
+                // Keep our own flags current so a restriction (or its removal)
+                // takes effect on this socket without a reconnect.
+                if id == &self.cache.user_id {
+                    if let (Some(flags), Some(user)) =
+                        (data.flags, self.cache.users.get_mut(&self.cache.user_id))
+                    {
+                        user.flags = Some(flags);
+                    }
+                }
             }
             EventV1::UserRelationship { id, user, .. } => {
                 self.cache.users.insert(id.clone(), user.clone());

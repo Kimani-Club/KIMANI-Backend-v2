@@ -4,7 +4,7 @@ use crate::models::user::{
 };
 use crate::permissions::defn::UserPerms;
 use crate::permissions::r#impl::user::{get_relationship, get_relationship_note};
-use crate::{perms, Database, Error, Result};
+use crate::{perms, Database, Error, Result, UserPermission};
 
 use futures::try_join;
 use impl_ops::impl_op_ex_commutative;
@@ -34,14 +34,20 @@ impl User {
 
         db.update_user(&self.id, &partial, remove.clone()).await?;
 
-        EventV1::UserUpdate {
+        let event = EventV1::UserUpdate {
             id: self.id.clone(),
             data: partial,
             clear: remove,
             event_id: Some(ulid::Ulid::new().to_string()),
+        };
+
+        // Restricted members are shadowed, so their updates only reach their
+        // own topic (themselves and staff/friends with a DM), not server topics.
+        if self.is_restricted() {
+            event.p(self.id.clone()).await;
+        } else {
+            event.p_user(self.id.clone(), db).await;
         }
-        .p_user(self.id.clone(), db)
-        .await;
 
         Ok(())
     }
@@ -367,6 +373,42 @@ impl User {
         Ok(())
     }
 
+    /// Refuse a new friendship or group between `self` (the actor) and `target`
+    /// when either side is restricted, unless the actor is privileged staff.
+    ///
+    /// A restricted target answers as unknown, so it stays shadowed.
+    pub fn check_can_connect(&self, target: &User) -> Result<()> {
+        if self.privileged {
+            Ok(())
+        } else if target.is_restricted() {
+            Err(Error::UnknownUser)
+        } else if self.is_restricted() {
+            Error::from_user_permission(UserPermission::SendMessage)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Visibility rule for listings (member lists, Ready): restricted members
+    /// are hidden from everyone except privileged staff and themselves.
+    pub fn is_visible_to(&self, viewer: &User) -> bool {
+        !self.is_restricted() || viewer.privileged || viewer.id == self.id
+    }
+
+    /// Drop the users `viewer` may not see and return the removed ids, so a
+    /// caller can drop the matching member rows as well.
+    pub fn retain_visible(viewer: &User, users: &mut Vec<User>) -> HashSet<String> {
+        let mut hidden = HashSet::new();
+        users.retain(|user| {
+            let visible = user.is_visible_to(viewer);
+            if !visible {
+                hidden.insert(user.id.clone());
+            }
+            visible
+        });
+        hidden
+    }
+
     /// Add another user as a friend
     ///
     /// `note` is an optional message attached by the sender, shown to the
@@ -380,6 +422,8 @@ impl User {
         target: &mut User,
         note: Option<String>,
     ) -> Result<()> {
+        self.check_can_connect(target)?;
+
         match get_relationship(self, &target.id) {
             RelationshipStatus::User => Err(Error::NoEffect),
             RelationshipStatus::Friend => Err(Error::AlreadyFriends),

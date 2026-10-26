@@ -289,6 +289,7 @@ pub async fn update_bulk_guest_status(
                     active: true,
                     recipients: vec![_user.id.clone(), recipient_id.clone()],
                     last_message_id: None,
+                    staff_id: None,
                 };
 
                 new_channel.create(db).await?;
@@ -547,6 +548,7 @@ pub async fn send_bulk_messages(
                 active: true,
                 recipients: vec![user.id.clone(), message.user_id.clone()],
                 last_message_id: None,
+                staff_id: None,
             };
 
             new_channel.create(db).await?;
@@ -684,6 +686,7 @@ pub async fn notify_guests(
                         active: false,
                         recipients: vec![user.id.clone(), user_id.clone()],
                         last_message_id: None,
+                        staff_id: None,
                     };
 
                     new_channel.create(db).await?;
