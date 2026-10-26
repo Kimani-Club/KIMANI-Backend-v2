@@ -382,7 +382,7 @@ impl User {
             Ok(())
         } else if target.is_restricted() {
             Err(Error::UnknownUser)
-        } else if self.is_restricted() {
+        } else if self.is_restricted_actor() {
             Error::from_user_permission(UserPermission::SendMessage)
         } else {
             Ok(())
@@ -806,5 +806,36 @@ mod friend_request_tests {
             serde_json::from_value(json!({"_id":"sender","status":"Incoming"})).unwrap();
         assert!(legacy.note.is_none());
         assert!(to_value(legacy).unwrap().get("note").is_none());
+    }
+}
+
+#[cfg(test)]
+mod restricted_connect_tests {
+    use super::*;
+    use crate::models::user::Flags;
+
+    fn user(id: &str, restricted: bool, privileged: bool) -> User {
+        User {
+            id: id.into(),
+            flags: restricted.then(|| Flags::Restricted as i32),
+            privileged,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn check_can_connect_refuses_restricted_parties_unless_staff() {
+        let member = user("member", false, false);
+        let restricted = user("restricted", true, false);
+        let staff = user("staff", false, true);
+
+        assert!(member.check_can_connect(&user("other", false, false)).is_ok());
+        assert!(matches!(member.check_can_connect(&restricted), Err(Error::UnknownUser)));
+        assert!(matches!(
+            restricted.check_can_connect(&member),
+            Err(Error::MissingUserPermission { .. })
+        ));
+        assert!(restricted.check_can_connect(&staff).is_err());
+        assert!(staff.check_can_connect(&restricted).is_ok());
     }
 }

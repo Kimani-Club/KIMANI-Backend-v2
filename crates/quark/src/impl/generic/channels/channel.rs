@@ -50,15 +50,12 @@ impl Channel {
         matches!(self, Channel::DirectMessage { .. })
     }
 
-    /// Whether this is a DM opened by a privileged (staff) user, see [Channel::DirectMessage]
-    pub fn is_staff_dm(&self) -> bool {
-        matches!(
-            self,
-            Channel::DirectMessage {
-                staff_id: Some(_),
-                ..
-            }
-        )
+    /// Id of the staff user who opened this DM, if it is a staff DM (see [Channel::DirectMessage])
+    pub fn staff_id(&self) -> Option<&str> {
+        match self {
+            Channel::DirectMessage { staff_id, .. } => staff_id.as_deref(),
+            _ => None,
+        }
     }
 
     /// Create a channel

@@ -76,16 +76,17 @@ pub async fn member_experimental_query(
         left.len().cmp(&right.len())
     });
 
-    // Take the first five and return them
+    // Take the first ten and return them
     let (members, users) = zipped_vec.into_iter().take(10).unzip();
     Ok(Json(MemberQueryResponse { members, users }))
 }
 
 /// Pair each member with its user by id, dropping members without a user.
 ///
-/// `fetch_users` skips suspended, restricted-for-this-viewer and unreadable
-/// documents, so a positional zip of the two sorted lists paired members
-/// with the wrong users as soon as one was missing.
+/// The user list can be shorter than the member list (`fetch_users` skips
+/// suspended and unreadable documents, and `retain_visible` drops restricted
+/// users), so a positional zip paired members with the wrong users as soon
+/// as one was missing.
 fn pair_by_user_id(members: Vec<Member>, users: Vec<User>) -> Vec<(Member, User)> {
     let mut users: HashMap<String, User> =
         users.into_iter().map(|user| (user.id.clone(), user)).collect();

@@ -250,6 +250,12 @@ impl User {
     pub fn is_restricted(&self) -> bool {
         self.flags.unwrap_or(0) & (Flags::Restricted as i32) != 0
     }
+
+    /// A restricted member acting without staff privilege on this request:
+    /// the actor every restriction check refuses.
+    pub fn is_restricted_actor(&self) -> bool {
+        self.is_restricted() && !self.privileged
+    }
 }
 
 #[cfg(test)]

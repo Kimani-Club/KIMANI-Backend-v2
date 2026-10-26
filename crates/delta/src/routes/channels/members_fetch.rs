@@ -18,9 +18,11 @@ pub async fn req(db: &Db, user: User, target: Ref) -> Result<Json<Vec<User>>> {
         .await?;
 
     if let Channel::Group { recipients, .. } = channel {
+        let mut users = db.fetch_users(&recipients).await?;
+        User::retain_visible(&user, &mut users);
+
         Ok(Json(
-            db.fetch_users(&recipients)
-                .await?
+            users
                 .into_iter()
                 .map(|x| x.with_relationship(&user))
                 .collect::<Vec<User>>(),
