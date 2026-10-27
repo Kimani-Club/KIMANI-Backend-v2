@@ -243,6 +243,16 @@ pub enum EventV1 {
     /// token. Published by microservices to the {user_id}! private channel; Bonfire
     /// forwards it unchanged.
     KimaniRolesChanged,
+
+    /// A trip shared from Destinations ("Travel post") was stored. Internal:
+    /// published on the global topic for the microservices rewards listener,
+    /// which reads the trip's owner from the database, never from here.
+    TravelPostCreated { id: String },
+
+    /// K Points were credited to this user. Published by the microservices
+    /// rewards program to the {user_id}! private channel, so every connected
+    /// client (web included, which has no push) refreshes its balance at once.
+    PointsEarned { points: i64, action_type: String },
 }
 
 #[cfg(test)]
@@ -255,5 +265,51 @@ mod kimani_event_tests {
         let event: EventV1 = serde_json::from_value(wire.clone()).unwrap();
         assert!(matches!(event, EventV1::KimaniRolesChanged));
         assert_eq!(serde_json::to_value(&event).unwrap(), wire);
+    }
+}
+
+#[cfg(test)]
+mod rewards_event_tests {
+    use super::*;
+
+    // The microservices listener matches on exactly this shape
+    // (apps/notifications/src/listener/listener.controller.ts).
+    #[test]
+    fn travel_post_created_serializes_as_the_listener_expects() {
+        let event = EventV1::TravelPostCreated {
+            id: "6560f1c2a1b2c3d4e5f60718".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(&event).unwrap(),
+            serde_json::json!({
+                "type": "TravelPostCreated",
+                "id": "6560f1c2a1b2c3d4e5f60718"
+            })
+        );
+    }
+
+    // Published by microservices (libs/revolt/src/bonfire/bonfire-events.service.ts).
+    #[test]
+    fn points_earned_deserializes_from_the_microservices_payload() {
+        let event: EventV1 = serde_json::from_str(
+            r#"{"type":"PointsEarned","points":1000,"action_type":"travel_post"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            event,
+            EventV1::PointsEarned { points: 1000, ref action_type } if action_type == "travel_post"
+        ));
+    }
+
+    // Bonfire decodes every Redis payload as an EventV1 and only warns
+    // ("Failed to deserialise an event") when that fails. An event type this
+    // build does not know yet must therefore be a plain decode error, never a
+    // panic — that is what keeps a mixed-version rollout safe.
+    #[test]
+    fn an_unknown_event_type_is_a_decode_error_not_a_panic() {
+        let decoded = serde_json::from_str::<EventV1>(
+            r#"{"type":"SomethingFromTheFuture","points":1}"#,
+        );
+        assert!(decoded.is_err());
     }
 }
