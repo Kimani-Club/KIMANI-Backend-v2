@@ -3,12 +3,12 @@ use revolt_quark::authifier::Authifier;
 use revolt_quark::{
     models::channels::channel::{Channel, PartialChannel},
     models::channels::message::Message,
-    models::events::event::PartialEvent,
+    models::events::event::{Event, PartialEvent},
     models::events::guest::{EventGuest, GuestStatus},
     models::user::User,
     types::push::MessageAuthor,
     variables::delta::APP_URL,
-    Database, Error, Result,
+    perms, Database, Error, Result, UserPermission,
 };
 use rocket::{serde::json::Json, State};
 use serde::{Deserialize, Serialize};
@@ -153,10 +153,14 @@ pub async fn update_guest_status(
 pub async fn update_bulk_guest_status(
     authifier: &State<Authifier>,
     db: &State<Database>,
-    _user: User,
+    user: User,
     event_id: String,
     data: Json<BulkStatusUpdate>,
 ) -> Result<Json<()>> {
+    // Approving/rejecting requests is the organiser's job (the events portal's
+    // pending-requests screen) and DMs the hosts as the caller.
+    check_event_organiser(&db.fetch_event(Some(&user.id), &event_id).await?, &user)?;
+
     let data = data.into_inner();
     let mut approved_guests = Vec::new();
     let mut rejected_guests = Vec::new();
@@ -277,9 +281,13 @@ pub async fn update_bulk_guest_status(
         );
 
         for recipient_id in recipients {
+            if !may_reach(db, &user, &recipient_id).await {
+                continue;
+            }
+
             // Find or create DM channel
             let channel = if let Ok(channel) = db
-                .find_direct_message_channel(&_user.id, &recipient_id)
+                .find_direct_message_channel(&user.id, &recipient_id)
                 .await
             {
                 channel
@@ -287,8 +295,9 @@ pub async fn update_bulk_guest_status(
                 let new_channel = Channel::DirectMessage {
                     id: Ulid::new().to_string(),
                     active: true,
-                    recipients: vec![_user.id.clone(), recipient_id.clone()],
+                    recipients: vec![user.id.clone(), recipient_id.clone()],
                     last_message_id: None,
+                    staff_id: None,
                 };
 
                 new_channel.create(db).await?;
@@ -299,13 +308,13 @@ pub async fn update_bulk_guest_status(
             let mut msg = Message {
                 id: Ulid::new().to_string(),
                 channel: channel.id().to_string(),
-                author: _user.id.clone(),
+                author: user.id.clone(),
                 content: Some(status_message.clone()),
                 ..Default::default()
             };
 
             // Create the message with proper notification handling
-            msg.create(db, &channel, Some(MessageAuthor::User(&_user)))
+            msg.create(db, &channel, Some(MessageAuthor::User(&user)))
                 .await?;
         }
     }
@@ -526,15 +535,22 @@ pub async fn send_bulk_messages(
 
     // Verify sender is event owner or host
     let event = db.fetch_event(Some(&user.id), &event_id).await?;
-    if event.created_by.as_deref() != Some(&user.id) && !event.hosts.contains(&user.id) {
-        return Err(Error::NotFound);
-    }
+    check_event_organiser(&event, &user)?;
 
     // Get current invited_count or initialize to 0
     let mut invited_count = event.invited_count.unwrap_or(0);
 
     // Send messages
     for message in data.messages {
+        // Invitees are not guests yet, so the recipient can be any member the
+        // organiser can see (friend or shared server/DM/group, not blocked).
+        let Ok(recipient) = db.fetch_user(&message.user_id).await else {
+            continue;
+        };
+        if !perms(&user).user(&recipient).calc_user(db).await.get_view_profile() {
+            continue;
+        }
+
         // Find or create DM channel
         let channel = if let Ok(channel) = db
             .find_direct_message_channel(&user.id, &message.user_id)
@@ -547,6 +563,7 @@ pub async fn send_bulk_messages(
                 active: true,
                 recipients: vec![user.id.clone(), message.user_id.clone()],
                 last_message_id: None,
+                staff_id: None,
             };
 
             new_channel.create(db).await?;
@@ -660,9 +677,7 @@ pub async fn notify_guests(
 
     // Verify sender is event owner or host
     let event = db.fetch_event(Some(&user.id), &event_id).await?;
-    if event.created_by.as_deref() != Some(&user.id) && !event.hosts.contains(&user.id) {
-        return Err(Error::NotFound);
-    }
+    check_event_organiser(&event, &user)?;
 
     // Get all guests for this event with matching statuses
     let guests = db.get_event_guests(&event_id).await?;
@@ -674,6 +689,10 @@ pub async fn notify_guests(
     // Process each guest
     for guest in filtered_guests {
         if let Some(user_id) = &guest.user_id {
+            if !may_reach(db, &user, user_id).await {
+                continue;
+            }
+
             // Find or create DM channel and send message
             let channel =
                 if let Ok(channel) = db.find_direct_message_channel(&user.id, user_id).await {
@@ -684,6 +703,7 @@ pub async fn notify_guests(
                         active: false,
                         recipients: vec![user.id.clone(), user_id.clone()],
                         last_message_id: None,
+                        staff_id: None,
                     };
 
                     new_channel.create(db).await?;
@@ -742,6 +762,27 @@ pub async fn notify_guests(
 }
 
 // Helper function to convert validation errors to strings
+/// Guard for the event tools that DM people as the caller: only the event's
+/// creator or a host may use them, and never while restricted.
+fn check_event_organiser(event: &Event, user: &User) -> Result<()> {
+    if user.is_restricted_actor() {
+        Error::from_user_permission(UserPermission::SendMessage)
+    } else if event.created_by.as_deref() != Some(&user.id) && !event.hosts.contains(&user.id) {
+        Err(Error::NotFound)
+    } else {
+        Ok(())
+    }
+}
+
+/// Whether an event tool may DM `recipient_id` as `sender`: restricted members
+/// are shadowed from everyone but staff.
+async fn may_reach(db: &Database, sender: &User, recipient_id: &str) -> bool {
+    match db.fetch_user(recipient_id).await {
+        Ok(recipient) => recipient.is_visible_to(sender),
+        Err(_) => false,
+    }
+}
+
 fn validation_errors_to_strings(errors: &validator::ValidationErrors) -> Vec<String> {
     errors
         .field_errors()
@@ -754,4 +795,57 @@ fn validation_errors_to_strings(errors: &validator::ValidationErrors) -> Vec<Str
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod organiser_tests {
+    use revolt_quark::models::user::Flags;
+
+    use super::*;
+
+    fn event() -> Event {
+        Event {
+            created_by: Some("creator".into()),
+            hosts: vec!["host".into()],
+            ..Default::default()
+        }
+    }
+
+    fn user(id: &str, flags: Option<i32>) -> User {
+        User {
+            id: id.into(),
+            flags,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn only_unrestricted_creator_or_host_may_message_as_organiser() {
+        let event = event();
+        assert!(check_event_organiser(&event, &user("creator", None)).is_ok());
+        assert!(check_event_organiser(&event, &user("host", None)).is_ok());
+        assert!(matches!(
+            check_event_organiser(&event, &user("stranger", None)),
+            Err(Error::NotFound)
+        ));
+        assert!(matches!(
+            check_event_organiser(&event, &user("host", Some(Flags::Restricted as i32))),
+            Err(Error::MissingUserPermission { .. })
+        ));
+    }
+
+    #[async_std::test]
+    async fn invitations_skip_restricted_members_unless_sent_by_staff() {
+        let db = revolt_quark::DatabaseInfo::Dummy.connect().await.unwrap();
+        let restricted = user("target", Some(Flags::Restricted as i32));
+        let host = user("host", None);
+        let staff = User {
+            privileged: true,
+            ..user("staff", None)
+        };
+
+        assert!(perms(&host).user(&user("target", None)).calc_user(&db).await.get_view_profile());
+        assert!(!perms(&host).user(&restricted).calc_user(&db).await.get_view_profile());
+        assert!(perms(&staff).user(&restricted).calc_user(&db).await.get_view_profile());
+    }
 }

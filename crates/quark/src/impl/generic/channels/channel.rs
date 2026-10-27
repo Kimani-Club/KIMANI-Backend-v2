@@ -50,6 +50,14 @@ impl Channel {
         matches!(self, Channel::DirectMessage { .. })
     }
 
+    /// Id of the staff user who opened this DM, if it is a staff DM (see [Channel::DirectMessage])
+    pub fn staff_id(&self) -> Option<&str> {
+        match self {
+            Channel::DirectMessage { staff_id, .. } => staff_id.as_deref(),
+            _ => None,
+        }
+    }
+
     /// Create a channel
     pub async fn create(&self, db: &Database) -> Result<()> {
         db.insert_channel(self).await?;
@@ -151,9 +159,15 @@ impl Channel {
     pub fn apply_options(&mut self, partial: PartialChannel) {
         // ! FIXME: maybe flatten channel object?
         match self {
-            Self::DirectMessage { active, .. } => {
+            Self::DirectMessage {
+                active, staff_id, ..
+            } => {
                 if let Some(v) = partial.active {
                     *active = v;
+                }
+
+                if let Some(v) = partial.staff_id {
+                    staff_id.replace(v);
                 }
             }
             Self::Group {

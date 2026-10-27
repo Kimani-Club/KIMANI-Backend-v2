@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 
 use crate::{
-    models::Channel, permissions::PermissionCalculator, Override, Permission, PermissionValue,
+    get_relationship,
+    models::{user::RelationshipStatus, Channel}, permissions::PermissionCalculator, Override, Permission, PermissionValue,
     Permissions, Perms, Result, ALLOW_IN_TIMEOUT, DEFAULT_PERMISSION_DIRECT_MESSAGE, DEFAULT_PERMISSION_MARKETPLACE_DM,
     DEFAULT_PERMISSION_SAVED_MESSAGES, DEFAULT_PERMISSION_VIEW_ONLY,
 };
@@ -17,18 +18,37 @@ impl PermissionCalculator<'_> {
             return Ok(Permissions([GrantAllSafe as u64]));
         }
 
-        let value = if self.channel.has() {
+        let mut value = if self.channel.has() {
             calculate_channel_permission(self, db).await?
         } else if self.server.has() {
             calculate_server_permission(self, db).await?
         } else {
             panic!("Expected `PermissionCalculator.(user|server) to exist.");
+        };
+
+        // A restricted (frozen) member keeps read access but can no longer post,
+        // react, upload, invite or join voice anywhere — except their saved notes
+        // and a staff DM opened to them, which is how admins and the member talk.
+        let exempt = self.channel.get().map_or(false, |channel| {
+            matches!(channel, Channel::SavedMessages { .. })
+                || is_member_side_of_staff_dm(channel, &self.perspective.id)
+        });
+
+        if self.perspective.is_restricted() && !exempt {
+            value.restrict(*DEFAULT_PERMISSION_VIEW_ONLY);
         }
-        .into();
+
+        let value = value.into();
 
         self.cached_permission = Some(value);
         Ok(Permissions([value]))
     }
+}
+
+/// Whether `user_id` is the member (non-staff) recipient of a staff DM
+fn is_member_side_of_staff_dm(channel: &Channel, user_id: &str) -> bool {
+    matches!(channel, Channel::DirectMessage { recipients, .. } if recipients.iter().any(|r| r == user_id))
+        && channel.staff_id().map_or(false, |staff| staff != user_id)
 }
 
 /// Internal helper function for calculating server permission
@@ -120,12 +140,27 @@ async fn calculate_channel_permission(
         }
         Channel::DirectMessage { recipients, .. } => {
             // 2. Ensure we are a recipient.
-            if recipients.contains(&data.perspective.id) {
+            if !recipients.contains(&data.perspective.id) {
+                0_u64.into()
+            } else {
                 // 3. Fetch user.
                 let other_user = recipients
                     .iter()
                     .find(|x| x != &&data.perspective.id)
                     .unwrap();
+
+                let blocked = matches!(
+                    get_relationship(data.perspective, other_user),
+                    RelationshipStatus::Blocked | RelationshipStatus::BlockedOther
+                );
+
+                // A DM opened by staff stays writable for the member (no friendship
+                // needed, even while restricted) unless one side blocked the other.
+                // The staff side only writes while currently privileged, which
+                // returns early in `calc`; otherwise the normal rules below apply.
+                if !blocked && is_member_side_of_staff_dm(channel, &data.perspective.id) {
+                    return Ok((*DEFAULT_PERMISSION_DIRECT_MESSAGE).into());
+                }
 
                 let user = db.fetch_user(other_user).await?;
                 data.user.set(user);
@@ -139,8 +174,6 @@ async fn calculate_channel_permission(
                 } else {
                     (*DEFAULT_PERMISSION_VIEW_ONLY).into()
                 }
-            } else {
-                0_u64.into()
             }
         }
         Channel::Group {
@@ -252,4 +285,146 @@ async fn calculate_channel_permission(
     };
 
     Ok(value)
+}
+
+#[cfg(test)]
+mod restricted_tests {
+    use crate::{
+        models::{
+            user::{Flags, Relationship, RelationshipStatus},
+            Channel, User,
+        },
+        perms, Permission, DEFAULT_PERMISSION_DIRECT_MESSAGE, DEFAULT_PERMISSION_VIEW_ONLY,
+    };
+
+    fn user(id: &str, restricted: bool) -> User {
+        User {
+            id: id.into(),
+            flags: restricted.then(|| Flags::Restricted as i32),
+            ..Default::default()
+        }
+    }
+
+    fn friend_of(mut user: User, other: &str) -> User {
+        user.relations = Some(vec![Relationship {
+            id: other.into(),
+            status: RelationshipStatus::Friend,
+            note: None,
+        }]);
+        user
+    }
+
+    fn dm(staff_id: Option<&str>) -> Channel {
+        Channel::DirectMessage {
+            id: "dm".into(),
+            active: true,
+            recipients: vec!["admin".into(), "member".into()],
+            last_message_id: None,
+            staff_id: staff_id.map(Into::into),
+        }
+    }
+
+    async fn channel_permission(perspective: &User, channel: &Channel) -> u64 {
+        let db = crate::DatabaseInfo::Dummy.connect().await.unwrap();
+        perms(perspective).channel(channel).calc(&db).await.unwrap().0[0]
+    }
+
+    #[async_std::test]
+    async fn restricted_member_is_view_only_in_server_channel() {
+        let channel = Channel::TextChannel {
+            id: "channel".into(),
+            server: "server".into(),
+            name: "general".into(),
+            description: None,
+            icon: None,
+            banner: None,
+            last_message_id: None,
+            default_permissions: None,
+            role_permissions: Default::default(),
+            nsfw: false,
+            hide_title: false,
+            password: None,
+        };
+
+        let active = channel_permission(&user("member", false), &channel).await;
+        assert_ne!(active & Permission::SendMessage as u64, 0);
+
+        let restricted = channel_permission(&user("member", true), &channel).await;
+        assert_eq!(restricted, *DEFAULT_PERMISSION_VIEW_ONLY);
+    }
+
+    fn blocking(mut user: User, other: &str, status: RelationshipStatus) -> User {
+        user.relations = Some(vec![Relationship {
+            id: other.into(),
+            status,
+            note: None,
+        }]);
+        user
+    }
+
+    #[async_std::test]
+    async fn member_can_always_reply_in_a_staff_dm_even_when_restricted() {
+        let channel = dm(Some("admin"));
+        for member in [user("member", false), user("member", true)] {
+            assert_eq!(
+                channel_permission(&member, &channel).await,
+                *DEFAULT_PERMISSION_DIRECT_MESSAGE
+            );
+        }
+
+        let staff = User {
+            privileged: true,
+            ..user("admin", false)
+        };
+        assert_ne!(
+            channel_permission(&staff, &channel).await & Permission::SendMessage as u64,
+            0
+        );
+    }
+
+    #[async_std::test]
+    async fn former_staff_falls_back_to_normal_dm_rules() {
+        // No longer privileged and not a friend: the staff mark grants nothing.
+        assert_eq!(
+            channel_permission(&user("admin", false), &dm(Some("admin"))).await,
+            *DEFAULT_PERMISSION_VIEW_ONLY
+        );
+    }
+
+    #[async_std::test]
+    async fn staff_dm_honours_blocks() {
+        let channel = dm(Some("admin"));
+        for status in [RelationshipStatus::Blocked, RelationshipStatus::BlockedOther] {
+            let member = blocking(user("member", false), "admin", status);
+            assert_eq!(
+                channel_permission(&member, &channel).await,
+                *DEFAULT_PERMISSION_VIEW_ONLY
+            );
+        }
+    }
+
+    #[async_std::test]
+    async fn saved_messages_stay_writable_when_restricted() {
+        let channel = Channel::SavedMessages {
+            id: "notes".into(),
+            user: "member".into(),
+        };
+        assert_ne!(
+            channel_permission(&user("member", true), &channel).await & Permission::SendMessage as u64,
+            0
+        );
+    }
+
+    #[async_std::test]
+    async fn plain_dm_is_view_only_for_a_restricted_member() {
+        let channel = dm(None);
+        assert_eq!(
+            channel_permission(&friend_of(user("member", false), "admin"), &channel).await,
+            *DEFAULT_PERMISSION_DIRECT_MESSAGE
+        );
+        assert_eq!(
+            channel_permission(&friend_of(user("member", true), "admin"), &channel).await,
+            *DEFAULT_PERMISSION_VIEW_ONLY
+        );
+    }
 }

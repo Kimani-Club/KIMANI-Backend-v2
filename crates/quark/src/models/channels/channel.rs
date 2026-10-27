@@ -34,6 +34,11 @@ pub enum Channel {
         /// Id of the last message sent in this channel
         #[serde(skip_serializing_if = "Option::is_none")]
         last_message_id: Option<String>,
+        /// Id of the privileged (Auth0 `revolt:privileged`) user who opened this DM.
+        ///
+        /// A staff DM lets the member reply without a friendship, even while restricted.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        staff_id: Option<String>,
     },
     /// Group channel between 1 or more participants
     Group {
@@ -206,6 +211,8 @@ pub struct PartialChannel {
     pub last_message_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub staff_id: Option<String>,
 }
 
 /// Optional fields on channel object

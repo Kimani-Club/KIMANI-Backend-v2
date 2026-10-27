@@ -49,6 +49,10 @@ pub async fn req(
 
     let mut users = User::fetch_foreign_users(db, &user_ids).await?;
 
+    // Shadow restricted members (row and user) from non-privileged viewers.
+    let hidden = User::retain_visible(&user, &mut users);
+    members.retain(|member| !hidden.contains(&member.id.user));
+
     // Ensure the lists match up exactly.
     members.sort_by(|a, b| a.id.user.cmp(&b.id.user));
     users.sort_by(|a, b| a.id.cmp(&b.id));

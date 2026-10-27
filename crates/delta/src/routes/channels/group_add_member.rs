@@ -23,6 +23,7 @@ pub async fn req(db: &Db, user: User, target: Ref, member: Ref) -> Result<EmptyR
     match &channel {
         Channel::Group { .. } => {
             let member = member.as_user(db).await?;
+            user.check_can_connect(&member)?;
             if !matches!(
                 get_relationship(&user, &member.id),
                 RelationshipStatus::Friend

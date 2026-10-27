@@ -27,6 +27,9 @@ auto_derived!(
             /// Id of the last message sent in this channel
             #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
             last_message_id: Option<String>,
+            /// Id of the privileged user who opened this DM (staff DM)
+            #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none", default))]
+            staff_id: Option<String>,
         },
         /// Group channel between 1 or more participants
         Group {
