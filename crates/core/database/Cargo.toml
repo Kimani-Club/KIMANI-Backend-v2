@@ -21,6 +21,7 @@ redis-is-patched = [ "revolt-presence/redis-is-patched" ]
 default = [ "mongodb", "async-std-runtime" ]
 
 [dependencies]
+kimani-auth0 = { path = "../auth0" }
 # Core
 revolt-result = { version = "0.6.5", path = "../result" }
 revolt-models = { version = "0.6.5", path = "../models" }

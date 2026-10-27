@@ -25,6 +25,7 @@ test = [ "async-std", "mongo", "mongodb/async-std-runtime", "rocket_impl" ]
 default = [ "test" ]
 
 [dependencies]
+kimani-auth0 = { path = "../core/auth0" }
 # Serialisation
 revolt_optional_struct = "0.2.0"
 serde = { version = "1", features = ["derive"] }

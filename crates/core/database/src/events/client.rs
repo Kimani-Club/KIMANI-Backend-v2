@@ -234,6 +234,11 @@ pub enum EventV1 {
     /// Published by external services (e.g. NestJS) to the {user_id}! private channel
     /// after revoking all sessions for a soft-deleted member.
     SessionRevoke,
+
+    /// Tells the client its Auth0 roles or permissions changed, so it refreshes its Auth0
+    /// token. Published by microservices to the {user_id}! private channel; Bonfire
+    /// forwards it unchanged.
+    KimaniRolesChanged,
 }
 
 impl EventV1 {
@@ -270,5 +275,18 @@ impl EventV1 {
     /// Publish internal global event
     pub async fn global(self) {
         self.p("global".to_string()).await;
+    }
+}
+
+#[cfg(test)]
+mod kimani_event_tests {
+    use super::EventV1;
+
+    #[test]
+    fn kimani_roles_changed_round_trips_as_a_bare_type_tag() {
+        let wire = serde_json::json!({ "type": "KimaniRolesChanged" });
+        let event: EventV1 = serde_json::from_value(wire.clone()).unwrap();
+        assert!(matches!(event, EventV1::KimaniRolesChanged));
+        assert_eq!(serde_json::to_value(&event).unwrap(), wire);
     }
 }

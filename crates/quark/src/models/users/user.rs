@@ -207,7 +207,7 @@ pub struct User {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flags: Option<i32>,
     /// Whether this user is privileged
-    #[serde(skip_serializing_if = "if_false", default)]
+    #[serde(skip_serializing_if = "if_false", default, skip_deserializing)]
     pub privileged: bool,
     /// Bot information
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -295,4 +295,16 @@ pub enum UserHint {
     Bot,
     /// Only match users
     User,
+}
+
+#[cfg(test)]
+mod auth0_authority_tests {
+    use super::*;
+    #[test]
+    fn stored_privileged_flag_never_grants_platform_authority() {
+        let user = User { privileged: true, ..Default::default() };
+        let stored = serde_json::to_value(&user).unwrap();
+        let loaded: User = serde_json::from_value(stored).unwrap();
+        assert!(!loaded.privileged);
+    }
 }
