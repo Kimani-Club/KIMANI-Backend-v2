@@ -28,6 +28,11 @@ services:
       REVOLT_MAX_GROUP_SIZE: 150
       REVOLT_VAPID_PRIVATE_KEY: $REVOLT_VAPID_PRIVATE_KEY
       REVOLT_VAPID_PUBLIC_KEY: $REVOLT_VAPID_PUBLIC_KEY
+      # Auth0 access-token check behind staff powers (revolt:privileged).
+      # Same tenant and values as microservices; unset = nobody is elevated.
+      AUTH0_ISSUER: https://auth.kimaniclub.com/
+      AUTH0_AUDIENCE: https://api.kimanilife.com
+      AUTH0_CLAIMS_NS: https://kimanilife.com/claims
 
   # Websockets Events
   bonfire:
@@ -39,6 +44,11 @@ services:
       RUST_BACKTRACE: full
       MONGODB: $MONGODB
       REDIS_URI: $REDIS_URI
+      # Auth0 access-token check on the websocket, as in delta.
+      # Same tenant and values as microservices; unset = nobody is elevated.
+      AUTH0_ISSUER: https://auth.kimaniclub.com/
+      AUTH0_AUDIENCE: https://api.kimanilife.com
+      AUTH0_CLAIMS_NS: https://kimanilife.com/claims
 
 networks:
   backend:
