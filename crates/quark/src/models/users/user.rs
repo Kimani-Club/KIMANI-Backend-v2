@@ -155,6 +155,9 @@ pub enum Flags {
     Banned = 4,
     /// User was marked as spam and removed from platform
     Spam = 8,
+    /// Member is frozen by an admin: read-only, shadowed from other members,
+    /// and may only talk to privileged (staff) users in staff DMs
+    Restricted = 16,
 }
 
 /// Bot information for if the user is a bot
@@ -207,7 +210,7 @@ pub struct User {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flags: Option<i32>,
     /// Whether this user is privileged
-    #[serde(skip_serializing_if = "if_false", default)]
+    #[serde(skip_serializing_if = "if_false", default, skip_deserializing)]
     pub privileged: bool,
     /// Bot information
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -238,6 +241,20 @@ impl User {
     /// member lists, and the WS Ready payload all check this.
     pub fn is_suspended(&self) -> bool {
         self.flags.unwrap_or(0) & (Flags::Suspended as i32) != 0
+    }
+
+    /// Bit 4 of `flags` — set by the microservices admin "restrict" action.
+    /// A restricted member keeps their session but is capped to view-only
+    /// everywhere except staff DMs and is hidden from non-privileged viewers;
+    /// the permission calculator and member/Ready listings enforce it.
+    pub fn is_restricted(&self) -> bool {
+        self.flags.unwrap_or(0) & (Flags::Restricted as i32) != 0
+    }
+
+    /// A restricted member acting without staff privilege on this request:
+    /// the actor every restriction check refuses.
+    pub fn is_restricted_actor(&self) -> bool {
+        self.is_restricted() && !self.privileged
     }
 }
 
@@ -273,6 +290,15 @@ mod suspended_tests {
         let combined = Flags::Suspended as i32 | Flags::Banned as i32;
         assert!(user_with_flags(Some(combined)).is_suspended());
     }
+
+    #[test]
+    fn restricted_bit_is_independent_of_suspended() {
+        let restricted = user_with_flags(Some(Flags::Restricted as i32));
+        assert!(restricted.is_restricted());
+        assert!(!restricted.is_suspended());
+        assert!(!user_with_flags(Some(Flags::Suspended as i32)).is_restricted());
+        assert!(!user_with_flags(None).is_restricted());
+    }
 }
 
 /// Optional fields on user object
@@ -295,4 +321,16 @@ pub enum UserHint {
     Bot,
     /// Only match users
     User,
+}
+
+#[cfg(test)]
+mod auth0_authority_tests {
+    use super::*;
+    #[test]
+    fn stored_privileged_flag_never_grants_platform_authority() {
+        let user = User { privileged: true, ..Default::default() };
+        let stored = serde_json::to_value(&user).unwrap();
+        let loaded: User = serde_json::from_value(stored).unwrap();
+        assert!(!loaded.privileged);
+    }
 }

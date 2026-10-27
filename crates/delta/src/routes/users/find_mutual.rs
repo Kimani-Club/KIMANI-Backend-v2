@@ -36,8 +36,14 @@ pub async fn req(db: &State<Database>, user: User, target: Ref) -> Result<Json<M
         .await
         .get_view_profile()
     {
+        // Restricted members are shadowed from non-privileged viewers.
+        let mut mutual = db
+            .fetch_users(&db.fetch_mutual_user_ids(&user.id, &target.id).await?)
+            .await?;
+        User::retain_visible(&user, &mut mutual);
+
         Ok(Json(MutualResponse {
-            users: db.fetch_mutual_user_ids(&user.id, &target.id).await?,
+            users: mutual.into_iter().map(|user| user.id).collect(),
             servers: db.fetch_mutual_server_ids(&user.id, &target.id).await?,
         }))
     } else {

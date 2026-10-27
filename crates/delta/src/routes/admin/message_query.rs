@@ -25,7 +25,7 @@ pub async fn message_query(
     // Fetch data using query
     let data = data.into_inner();
     let messages = db.fetch_messages(data).await?;
-    BulkMessageResponse::transform(db, None, messages, Some(true))
+    BulkMessageResponse::transform(db, &user, None, messages, Some(true))
         .await
         .map(Json)
 }

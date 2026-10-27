@@ -29,6 +29,9 @@ auto_derived!(
             /// Id of the last message sent in this channel
             #[serde(skip_serializing_if = "Option::is_none")]
             last_message_id: Option<String>,
+            /// Id of the privileged user who opened this DM (staff DM)
+            #[serde(skip_serializing_if = "Option::is_none", default)]
+            staff_id: Option<String>,
         },
         MarketplaceDM {
             #[serde(rename = "_id")]
