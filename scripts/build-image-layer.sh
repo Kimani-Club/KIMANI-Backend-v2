@@ -23,6 +23,7 @@ deps() {
     crates/bonfire/src \
     crates/delta/src \
     crates/quark/src \
+    crates/core/auth0/src \
     crates/core/database/src \
     crates/core/models/src \
     crates/core/permissions/src \
@@ -33,6 +34,7 @@ deps() {
     tee crates/delta/src/main.rs
   echo '' |
     tee crates/quark/src/lib.rs |
+    tee crates/core/auth0/src/lib.rs |
     tee crates/core/database/src/lib.rs |
     tee crates/core/models/src/lib.rs |
     tee crates/core/permissions/src/lib.rs |
@@ -46,6 +48,7 @@ apps() {
     crates/bonfire/src/main.rs \
     crates/delta/src/main.rs \
     crates/quark/src/lib.rs \
+    crates/core/auth0/src/lib.rs \
     crates/core/database/src/lib.rs \
     crates/core/models/src/lib.rs \
     crates/core/permissions/src/lib.rs \
