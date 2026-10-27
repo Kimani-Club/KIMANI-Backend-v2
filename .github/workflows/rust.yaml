@@ -21,16 +21,16 @@ jobs:
     name: Rust project
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
       - name: Install latest stable
-        uses: actions-rs/toolchain@v1
+        uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1
         with:
           toolchain: stable
           override: true
           components: rustfmt, clippy
 
       - name: Run cargo build
-        uses: actions-rs/cargo@v1
+        uses: actions-rs/cargo@844f36862e911db73fe0815f00a4a2602c279505 # v1
         with:
           command: build
 
@@ -39,12 +39,12 @@ jobs:
           docker compose -f docker-compose.db.yml up -d
 
       - name: Run cargo test
-        uses: actions-rs/cargo@v1
+        uses: actions-rs/cargo@844f36862e911db73fe0815f00a4a2602c279505 # v1
         with:
           command: test
 
       - name: Run cargo test (with MongoDB)
-        uses: actions-rs/cargo@v1
+        uses: actions-rs/cargo@844f36862e911db73fe0815f00a4a2602c279505 # v1
         env:
           MONGODB: mongodb://localhost
         with:
@@ -62,13 +62,13 @@ jobs:
 
       - name: Wait for API to go up
         if: github.event_name != 'pull_request' && github.ref_name == 'main'
-        uses: nev7n/wait_for_response@v1
+        uses: nev7n/wait_for_response@7fef3c1a6e8939d0b09062f14fec50d3c5d15fa1 # v1
         with:
           url: "http://localhost:8000/"
 
       - name: Checkout API repository
         if: github.event_name != 'pull_request' && github.ref_name == 'main'
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           repository: revoltchat/api
           path: api
@@ -80,7 +80,7 @@ jobs:
 
       - name: Commit changes
         if: github.event_name != 'pull_request' && github.ref_name == 'main'
-        uses: EndBug/add-and-commit@v4
+        uses: EndBug/add-and-commit@a988073222b8bd50f3ecfca9c0ab7dfbf0d08ceb # v4
         with:
           cwd: "api"
           add: "*.json"
