@@ -29,6 +29,8 @@ pub async fn req(db: &Db, user: User, target: Ref) -> Result<Json<InviteJoinResp
         return Err(Error::IsBot);
     }
 
+    refuse_restricted(&user)?;
+
     if !user.can_acquire_server(db).await? {
         return Err(Error::TooManyServers {
             max: *MAX_SERVER_COUNT,
@@ -43,5 +45,38 @@ pub async fn req(db: &Db, user: User, target: Ref) -> Result<Json<InviteJoinResp
             Ok(Json(InviteJoinResponse::Server { channels, server }))
         }
         _ => unreachable!(),
+    }
+}
+
+/// A restricted member cannot join new servers; the invite simply looks
+/// unknown so the response reveals nothing about the server.
+fn refuse_restricted(user: &User) -> Result<()> {
+    if user.is_restricted_actor() {
+        Err(Error::NotFound)
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use revolt_quark::models::user::Flags;
+
+    use super::*;
+
+    #[test]
+    fn restricted_member_cannot_join_but_staff_can() {
+        let restricted = User {
+            flags: Some(Flags::Restricted as i32),
+            ..Default::default()
+        };
+        assert!(matches!(refuse_restricted(&restricted), Err(Error::NotFound)));
+
+        let staff = User {
+            privileged: true,
+            ..restricted
+        };
+        assert!(refuse_restricted(&staff).is_ok());
+        assert!(refuse_restricted(&User::default()).is_ok());
     }
 }

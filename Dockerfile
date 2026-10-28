@@ -1,5 +1,5 @@
 # Build Stage
-FROM --platform="${BUILDPLATFORM}" rust:1.78-bookworm
+FROM --platform="${BUILDPLATFORM}" rust:1.86-bookworm
 USER 0:0
 WORKDIR /home/rust/src
 
@@ -20,6 +20,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates/bonfire/Cargo.toml ./crates/bonfire/
 COPY crates/delta/Cargo.toml ./crates/delta/
 COPY crates/quark/Cargo.toml ./crates/quark/
+COPY crates/core/auth0/Cargo.toml ./crates/core/auth0/
 COPY crates/core/database/Cargo.toml ./crates/core/database/
 COPY crates/core/models/Cargo.toml ./crates/core/models/
 COPY crates/core/permissions/Cargo.toml ./crates/core/permissions/

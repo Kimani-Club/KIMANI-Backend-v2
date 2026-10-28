@@ -65,6 +65,11 @@ pub async fn req(db: &Db, user: User, info: Json<DataCreateGroup>) -> Result<Jso
         }
     }
 
+    let others: Vec<String> = set.iter().filter(|id| *id != &user.id).cloned().collect();
+    for target in db.fetch_users(&others).await? {
+        user.check_can_connect(&target)?;
+    }
+
     let group = Channel::Group {
         id: Ulid::new().to_string(),
 

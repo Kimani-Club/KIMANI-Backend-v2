@@ -181,6 +181,9 @@ auto_derived!(
         Banned = 4,
         /// User was marked as spam and removed from platform
         Spam = 8,
+        /// Member is frozen by an admin: read-only, shadowed from other members,
+        /// and may only talk to privileged (staff) users in staff DMs
+        Restricted = 16,
     }
 
     /// Bot information for if the user is a bot

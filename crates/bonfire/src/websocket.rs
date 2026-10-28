@@ -49,10 +49,11 @@ pub fn spawn_client(db: &'static Database, stream: TcpStream, addr: SocketAddr) 
                 // If the user has not provided authentication, request information.
                 if config.get_session_token().is_none() {
                     'outer: while let Ok(message) = read.try_next().await {
-                        if let Ok(ClientMessage::Authenticate { token }) =
+                        if let Ok(ClientMessage::Authenticate { token, auth0_token }) =
                             config.decode(message.as_ref().unwrap())
                         {
                             config.set_session_token(token);
+                            config.set_auth0_token(auth0_token);
                             break 'outer;
                         }
                     }
@@ -61,7 +62,11 @@ pub fn spawn_client(db: &'static Database, stream: TcpStream, addr: SocketAddr) 
                 // Try to authenticate the user.
                 if let Some(token) = config.get_session_token().as_ref() {
                     match User::from_token(db, token, UserHint::Any).await {
-                        Ok(user) => {
+                        Ok(mut user) => {
+                            // An unverifiable `auth0_token` connects the socket without elevation.
+                            let authority = kimani_auth0::authority(config.get_auth0_token(), &user.id).await;
+                            user.privileged = user.bot.is_none() && authority.as_ref().map(|a| a.is_privileged).unwrap_or(false);
+                            let authority_expiry = if user.privileged { authority.map(|a| a.expires_at) } else { None };
                             info!("User {addr:?} authenticated as @{}", user.username);
 
                             // Create local state.
@@ -216,14 +221,29 @@ pub fn spawn_client(db: &'static Database, stream: TcpStream, addr: SocketAddr) 
                                     }
                                     .fuse();
 
-                                // Pin both tasks.
-                                pin_mut!(listener, worker);
+                                // An elevated socket closes when its JWT expires so the client reconnects
+                                // with a fresh proof (or as a normal member). Dropping the flag in place is
+                                // not enough: privilege decided which channels went into Ready and which
+                                // topics this socket subscribed to, and the client keeps what it received.
+                                let expiry = async {
+                                    if let Some(exp) = authority_expiry {
+                                        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default().as_secs();
+                                        task::sleep(std::time::Duration::from_secs(exp.saturating_sub(now))).await;
+                                    } else {
+                                        futures::future::pending::<()>().await;
+                                    }
+                                }.fuse();
+                                // Pin all tasks.
+                                pin_mut!(listener, worker, expiry);
 
                                 // Wait for either disconnect or for listener to die.
                                 select!(
                                     () = listener => {},
-                                    () = worker => {}
+                                    () = worker => {},
+                                    () = expiry => {}
                                 );
+                                write.lock().await.close().await.ok();
 
                                 // * Combine the streams back once we are ready to disconnect.
                                 /* ws = read.reunite(write).unwrap(); */
