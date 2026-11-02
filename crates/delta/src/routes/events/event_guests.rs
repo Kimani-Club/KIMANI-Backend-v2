@@ -194,7 +194,7 @@ pub async fn update_bulk_guest_status(
 ) -> Result<Json<()>> {
     // Approving/rejecting requests is the organiser's job (the events portal's
     // pending-requests screen) and DMs the hosts as the caller.
-    check_event_organiser(&db.fetch_event(Some(&user.id), &event_id).await?, &user)?;
+    check_event_manager(db, &db.fetch_event(Some(&user.id), &event_id).await?, &user).await?;
 
     let data = data.into_inner();
     let mut approved_guests = Vec::new();
@@ -362,9 +362,13 @@ pub async fn update_bulk_guest_status(
 #[get("/<event_id>/guests")]
 pub async fn get_event_guests(
     db: &State<Database>,
-    _user: User,
+    user: User,
     event_id: String,
 ) -> Result<Json<Vec<EventGuestView>>> {
+    // The guest list carries names, emails and phone numbers: only the event's
+    // organisers (or a Kimani admin) may read it, not any logged-in member.
+    check_event_manager(db, &db.fetch_event(Some(&user.id), &event_id).await?, &user).await?;
+
     let guests = db.get_event_guests(&event_id).await?;
 
     // One lookup for every account behind a main contact, rather than one per guest.
@@ -635,7 +639,7 @@ pub async fn send_bulk_messages(
 
     // Verify sender is event owner or host
     let event = db.fetch_event(Some(&user.id), &event_id).await?;
-    check_event_organiser(&event, &user)?;
+    check_event_manager(db, &event, &user).await?;
 
     // Get current invited_count or initialize to 0
     let mut invited_count = event.invited_count.unwrap_or(0);
@@ -777,7 +781,7 @@ pub async fn notify_guests(
 
     // Verify sender is event owner or host
     let event = db.fetch_event(Some(&user.id), &event_id).await?;
-    check_event_organiser(&event, &user)?;
+    check_event_manager(db, &event, &user).await?;
 
     // Get all guests for this event with matching statuses
     let guests = db.get_event_guests(&event_id).await?;
@@ -983,6 +987,53 @@ fn check_event_organiser(event: &Event, user: &User) -> Result<()> {
     }
 }
 
+/// The main Kimani server — mirrors the events portal's DEFAULT_SERVER_ID.
+const MAIN_SERVER_ID: &str = "01HP41709DFJP1DRSTSA88J81A";
+
+/// A Kimani app admin: Revolt staff, or the main server's owner, or a member
+/// holding a role whose id is "admin" or whose name is "Admin". Mirrors
+/// isAdminFrom in the events portal (UserContext.tsx); the portal's extra
+/// `1 << 5` permission-bit rule is inert (that bit is reserved, and server role
+/// permissions serialise as `{a, d}`, not a number), so it is not replicated.
+async fn is_kimani_admin(db: &Database, user: &User) -> bool {
+    if user.privileged {
+        return true;
+    }
+    let server = match db.fetch_server(MAIN_SERVER_ID).await {
+        Ok(server) => server,
+        Err(_) => return false,
+    };
+    if server.owner == user.id {
+        return true;
+    }
+    let member = match db.fetch_member(MAIN_SERVER_ID, &user.id).await {
+        Ok(member) => member,
+        Err(_) => return false,
+    };
+    member.roles.iter().any(|role_id| {
+        role_id == "admin"
+            || server
+                .roles
+                .get(role_id)
+                .map_or(false, |role| role.name.eq_ignore_ascii_case("admin"))
+    })
+}
+
+/// Like `check_event_organiser`, but a Kimani admin (see `is_kimani_admin`) may
+/// manage any event just like a host. Restricted actors are still refused.
+pub(super) async fn check_event_manager(db: &Database, event: &Event, user: &User) -> Result<()> {
+    match check_event_organiser(event, user) {
+        Err(Error::NotFound) => {
+            if is_kimani_admin(db, user).await {
+                Ok(())
+            } else {
+                Err(Error::NotFound)
+            }
+        }
+        other => other,
+    }
+}
+
 /// Whether an event tool may DM `recipient_id` as `sender`: restricted members
 /// are shadowed from everyone but staff.
 async fn may_reach(db: &Database, sender: &User, recipient_id: &str) -> bool {
@@ -1039,6 +1090,31 @@ mod organiser_tests {
         ));
         assert!(matches!(
             check_event_organiser(&event, &user("host", Some(Flags::Restricted as i32))),
+            Err(Error::MissingUserPermission { .. })
+        ));
+    }
+
+    #[async_std::test]
+    async fn kimani_admin_manages_any_event_like_a_host() {
+        let db = revolt_quark::DatabaseInfo::Dummy.connect().await.unwrap();
+        let event = event();
+
+        // Creator and host still pass without being admins.
+        assert!(check_event_manager(&db, &event, &user("creator", None)).await.is_ok());
+        assert!(check_event_manager(&db, &event, &user("host", None)).await.is_ok());
+
+        // The Dummy main server's owner is "owner": Kimani admins manage any event.
+        assert!(check_event_manager(&db, &event, &user("owner", None)).await.is_ok());
+        let staff = User { privileged: true, ..user("staff", None) };
+        assert!(check_event_manager(&db, &event, &staff).await.is_ok());
+
+        // A plain member still cannot, and a restricted actor is refused outright.
+        assert!(matches!(
+            check_event_manager(&db, &event, &user("stranger", None)).await,
+            Err(Error::NotFound)
+        ));
+        assert!(matches!(
+            check_event_manager(&db, &event, &user("host", Some(Flags::Restricted as i32))).await,
             Err(Error::MissingUserPermission { .. })
         ));
     }
