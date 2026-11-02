@@ -5,6 +5,8 @@ use rocket::{serde::json::Json, State};
 use serde::Deserialize;
 use validator::Validate;
 
+use super::event_guests::check_event_manager;
+
 impl From<DataEditEvent> for PartialEvent {
     fn from(data: DataEditEvent) -> Self {
         Self {
@@ -82,13 +84,15 @@ pub struct DataEditEvent {
 #[patch("/<id>", data = "<data>")]
 pub async fn update_event(
     db: &State<Database>,
-    user: Option<User>,
+    user: User,
     id: String,
     data: Json<DataEditEvent>,
 ) -> Result<Json<Event>> {
+    // Only the event's organisers (or a Kimani admin) may edit it.
+    let existing = db.fetch_event(Some(&user.id), &id).await?;
+    check_event_manager(db, &existing, &user).await?;
+
     db.update_event(&id, &data.into_inner().into()).await?;
-    let mut event = db
-        .fetch_event(user.as_ref().map(|u| u.id.as_str()), &id)
-        .await?;
+    let event = db.fetch_event(Some(&user.id), &id).await?;
     Ok(Json(event))
 }
