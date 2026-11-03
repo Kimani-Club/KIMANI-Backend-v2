@@ -445,17 +445,7 @@ pub async fn add_bulk_guests(
         Some(user) => {
             let account_email = account_email(authifier, &user.id).await;
             let contact = member_contact(user, account_email.as_deref());
-            if !contact.missing.is_empty() {
-                return Err(Error::InvalidRequest {
-                    code: "profile_incomplete".to_string(),
-                    errors: contact.missing,
-                });
-            }
-            (
-                contact.name,
-                contact.email.unwrap_or_default(),
-                contact.phone.unwrap_or_default(),
-            )
+            resolve_member_contact(contact, data.main_contact.as_ref())?
         }
         None => {
             let main_contact = data.main_contact.ok_or_else(|| Error::InvalidRequest {
@@ -931,6 +921,42 @@ fn member_contact(user: &User, account_email: Option<&str>) -> MemberContact {
     }
 }
 
+/// Decide a signed-in member's main contact: prefer the details their account
+/// supplies, and for any the account cannot — e.g. a provisioned account the
+/// backend can't fully read, which returns no email even though one is stored —
+/// fall back to the validated details the member typed in the form, rather than
+/// refusing a member who did provide them. Returns (name, email, phone).
+fn resolve_member_contact(
+    contact: MemberContact,
+    form: Option<&DataCreateGuest>,
+) -> Result<(String, String, String)> {
+    if contact.missing.is_empty() {
+        return Ok((
+            contact.name,
+            contact.email.unwrap_or_default(),
+            contact.phone.unwrap_or_default(),
+        ));
+    }
+
+    // The account is missing a field; the form must supply it, and must be valid.
+    let form = form.ok_or_else(|| Error::InvalidRequest {
+        code: "profile_incomplete".to_string(),
+        errors: contact.missing.clone(),
+    })?;
+    if let Err(validation_errors) = form.validate() {
+        return Err(Error::InvalidRequest {
+            code: "validation_error".to_string(),
+            errors: validation_errors_to_strings(&validation_errors),
+        });
+    }
+
+    Ok((
+        contact.name,
+        contact.email.unwrap_or_else(|| form.email.trim().to_string()),
+        contact.phone.unwrap_or_else(|| form.phone.trim().to_string()),
+    ))
+}
+
 /// Verified inviter of each companion, keyed by the companion's guest ID.
 ///
 /// Follows companion → plus_one_of → main contact → user_id, and only when
@@ -1231,6 +1257,76 @@ mod tests {
 
         let no_phone = member_contact(&user("u", "ana_p"), Some("ana@kimani.test"));
         assert_eq!(no_phone.missing, vec!["phone"]);
+    }
+
+    fn form_contact(email: &str, phone: &str) -> DataCreateGuest {
+        DataCreateGuest {
+            name: "Galit Perl".to_string(),
+            email: email.to_string(),
+            phone: phone.to_string(),
+            associated_user_id: None,
+            plus_one_of: None,
+            parent_guest_id: None,
+        }
+    }
+
+    #[test]
+    fn member_falls_back_to_the_form_when_the_account_cannot_supply_a_field() {
+        // Account returned no email (e.g. find_account failed) but has the phone.
+        let contact = MemberContact {
+            name: "Galit Perl".to_string(),
+            email: None,
+            phone: Some("19545590881".to_string()),
+            missing: vec!["email".to_string()],
+        };
+        let form = form_contact("Rnc2415@aol.com", "000");
+        let (name, email, phone) = resolve_member_contact(contact, Some(&form)).unwrap();
+        assert_eq!(name, "Galit Perl");
+        assert_eq!(email, "Rnc2415@aol.com"); // from the form
+        assert_eq!(phone, "19545590881"); // account value kept, not the form's
+    }
+
+    #[test]
+    fn member_account_details_win_over_the_form() {
+        let contact = MemberContact {
+            name: "Ana".to_string(),
+            email: Some("ana@account.test".to_string()),
+            phone: Some("111".to_string()),
+            missing: vec![],
+        };
+        let form = form_contact("form@x.test", "999");
+        let (_, email, phone) = resolve_member_contact(contact, Some(&form)).unwrap();
+        assert_eq!(email, "ana@account.test");
+        assert_eq!(phone, "111");
+    }
+
+    #[test]
+    fn member_fallback_rejects_an_invalid_form_email() {
+        let contact = MemberContact {
+            name: "x".to_string(),
+            email: None,
+            phone: Some("1".to_string()),
+            missing: vec!["email".to_string()],
+        };
+        let form = form_contact("notanemail", "1");
+        assert!(matches!(
+            resolve_member_contact(contact, Some(&form)),
+            Err(Error::InvalidRequest { code, .. }) if code == "validation_error"
+        ));
+    }
+
+    #[test]
+    fn member_with_no_account_details_and_no_form_still_errors() {
+        let contact = MemberContact {
+            name: "x".to_string(),
+            email: None,
+            phone: None,
+            missing: vec!["email".to_string(), "phone".to_string()],
+        };
+        assert!(matches!(
+            resolve_member_contact(contact, None),
+            Err(Error::InvalidRequest { code, .. }) if code == "profile_incomplete"
+        ));
     }
 
     #[test]
