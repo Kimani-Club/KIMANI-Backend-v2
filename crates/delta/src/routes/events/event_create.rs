@@ -45,6 +45,9 @@ pub struct DataCreateEvent {
     /// Show events to non-members
     #[serde(default)]
     pub show_to_non_members: bool,
+    /// Maximum number of attendees (overall capacity)
+    #[serde(default)]
+    pub capacity: Option<i32>,
     /// Event hosts (user IDs)
     pub hosts: Vec<String>,
     /// Event sponsors (user IDs)
@@ -120,6 +123,7 @@ pub async fn create_event(
         requires_plus_one_info: data.requires_plus_one_info,
         requires_rsvp_approval: data.requires_rsvp_approval,
         show_to_non_members: data.show_to_non_members,
+        capacity: data.capacity,
         hosts: data.hosts.clone(),
         sponsors: data.sponsors.clone(),
         currency: data.currency.clone(),
