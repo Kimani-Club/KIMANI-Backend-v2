@@ -94,6 +94,10 @@ pub struct Event {
     #[serde(skip_serializing_if = "if_false", default)]
     pub show_to_non_members: bool,
 
+    /// Maximum number of attendees (overall capacity); None = unlimited
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<i32>,
+
     /// Event hosts with their details
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub hosts: Vec<String>,
