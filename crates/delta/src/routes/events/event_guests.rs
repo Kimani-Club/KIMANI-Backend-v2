@@ -12,9 +12,38 @@ use revolt_quark::{
 };
 use rocket::{serde::json::Json, State};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use ulid::Ulid;
 use validator::Validate;
+
+/// Whether a guest may be moved to `Approved` right now.
+///
+/// An event with a `capacity` can never hold more `Approved` guests than that
+/// number; approvals past the limit are refused so the overflow stays
+/// `Pending`. `None` capacity = unlimited. A guest that is already approved is
+/// always allowed (idempotent — re-approving consumes no new slot).
+fn may_approve(capacity: Option<i32>, approved_count: i32, already_approved: bool) -> bool {
+    already_approved
+        || match capacity {
+            Some(cap) => approved_count < cap,
+            None => true,
+        }
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::may_approve;
+
+    #[test]
+    fn gate() {
+        assert!(may_approve(None, 1000, false)); // unlimited
+        assert!(may_approve(Some(10), 9, false)); // room left
+        assert!(!may_approve(Some(10), 10, false)); // full
+        assert!(!may_approve(Some(10), 11, false)); // somehow over
+        assert!(may_approve(Some(10), 10, true)); // already approved is idempotent
+        assert!(!may_approve(Some(0), 0, false)); // zero capacity blocks everyone
+    }
+}
 
 #[derive(Validate, Deserialize, JsonSchema)]
 pub struct DataCreateGuest {
@@ -177,8 +206,30 @@ pub async fn update_guest_status(
     guest_id: String,
     status: Json<GuestStatus>,
 ) -> Result<Json<()>> {
-    db.update_guest_status(&event_id, &guest_id, status.into_inner())
-        .await?;
+    let status = status.into_inner();
+
+    // Capacity gate (see update_bulk_guest_status): refuse to approve once the
+    // event is full, so Approved can never exceed the event's capacity.
+    if matches!(status, GuestStatus::Approved) {
+        let capacity = db.fetch_event(None, &event_id).await?.capacity;
+        let guests = db.get_event_guests(&event_id).await?;
+        let already_approved = guests
+            .iter()
+            .any(|g| g.id == guest_id && matches!(g.status, GuestStatus::Approved));
+        let approved = guests
+            .iter()
+            .filter(|g| matches!(g.status, GuestStatus::Approved))
+            .count() as i32;
+        if !may_approve(capacity, approved, already_approved) {
+            return Err(Error::InvalidRequest {
+                code: "event_at_capacity".to_string(),
+                errors: vec!["Event is at capacity; raise the capacity to approve more guests."
+                    .to_string()],
+            });
+        }
+    }
+
+    db.update_guest_status(&event_id, &guest_id, status).await?;
     Ok(Json(()))
 }
 
@@ -200,8 +251,31 @@ pub async fn update_bulk_guest_status(
     let mut approved_guests = Vec::new();
     let mut rejected_guests = Vec::new();
 
+    // Capacity gate: an event with a `capacity` can never have more Approved
+    // guests than that. Approvals past the limit are skipped (the guest stays
+    // Pending) — the host raises the capacity to approve more. Rejecting or
+    // un-approving a guest frees a slot. `None` capacity = unlimited.
+    let capacity = db.fetch_event(None, &event_id).await?.capacity;
+    let mut approved_ids: HashSet<String> = db
+        .get_event_guests(&event_id)
+        .await?
+        .into_iter()
+        .filter(|g| matches!(g.status, GuestStatus::Approved))
+        .map(|g| g.id)
+        .collect();
+
     // First update all guest statuses
     for update in &data.updates {
+        if matches!(update.status, GuestStatus::Approved) {
+            let already = approved_ids.contains(&update.guest_id);
+            if !may_approve(capacity, approved_ids.len() as i32, already) {
+                continue; // event full → leave this guest Pending
+            }
+            approved_ids.insert(update.guest_id.clone());
+        } else {
+            approved_ids.remove(&update.guest_id);
+        }
+
         db.update_guest_status(&event_id, &update.guest_id, update.status.clone())
             .await?;
 
