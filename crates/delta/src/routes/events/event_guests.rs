@@ -45,6 +45,11 @@ mod capacity_tests {
     }
 }
 
+/// Most companions one registration may bring. Registration is open to
+/// visitors without an account and every guest receives an email, so this
+/// bounds what one request can send.
+const MAX_ADDITIONAL_GUESTS: usize = 20;
+
 #[derive(Validate, Deserialize, JsonSchema)]
 pub struct DataCreateGuest {
     /// Guest's full name
@@ -201,11 +206,15 @@ pub async fn add_guest(
 #[patch("/<event_id>/guests/<guest_id>/status", data = "<status>")]
 pub async fn update_guest_status(
     db: &State<Database>,
-    _user: User,
+    user: User,
     event_id: String,
     guest_id: String,
     status: Json<GuestStatus>,
 ) -> Result<Json<()>> {
+    // Same rule as the bulk route: only the people running the event approve
+    // or reject its guests (any signed-in member could before).
+    check_event_manager(db, &db.fetch_event(Some(&user.id), &event_id).await?, &user).await?;
+
     let status = status.into_inner();
 
     // Capacity gate (see update_bulk_guest_status): refuse to approve once the
@@ -491,10 +500,12 @@ pub async fn get_registration_contact(
 #[get("/<event_id>/guests/<guest_id>", rank = 2)]
 pub async fn get_guest(
     db: &State<Database>,
-    _user: User,
+    user: User,
     event_id: String,
     guest_id: String,
 ) -> Result<Json<EventGuest>> {
+    // A guest record holds name, email and phone: organisers only, like the list.
+    check_event_manager(db, &db.fetch_event(Some(&user.id), &event_id).await?, &user).await?;
     let guest = db.get_guest(&event_id, &guest_id).await?;
     Ok(Json(guest))
 }
@@ -510,6 +521,15 @@ pub async fn add_bulk_guests(
     data: Json<DataCreateBulkGuests>,
 ) -> Result<Json<BulkGuestResponse>> {
     let data = data.into_inner();
+    if data.additional_guests.len() > MAX_ADDITIONAL_GUESTS {
+        return Err(Error::InvalidRequest {
+            code: "too_many_guests".to_string(),
+            errors: vec![format!(
+                "at most {} additional guests per registration",
+                MAX_ADDITIONAL_GUESTS
+            )],
+        });
+    }
     let mut created_guests = Vec::new();
 
     // First create the main contact. A signed-in member is registered as their
